@@ -6,9 +6,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const MONGODB_URI = "mongodb://digitalprofiteges_db_user:V1UgKbzS1Y3PbdLT@ac-sdh6h6q-shard-00-00.vol3oe1.mongodb.net:27017,ac-sdh6h6q-shard-00-01.vol3oe1.mongodb.net:27017,ac-sdh6h6q-shard-00-02.vol3oe1.mongodb.net:27017/?ssl=true&replicaSet=atlas-k69mzp-shard-0&authSource=admin&appName=Cluster0";
+const MONGODB_URI = "mongodb://kingocta472_db_user:B9rIexKrt0vCX4VL@ac-73kqdqc-shard-00-00.fprt86u.mongodb.net:27017,ac-73kqdqc-shard-00-01.fprt86u.mongodb.net:27017,ac-73kqdqc-shard-00-02.fprt86u.mongodb.net:27017/?ssl=true&replicaSet=atlas-13l5ac-shard-0&authSource=admin&appName=Cluster0";
 
-// ===== VERCEL-SAFE MONGODB CONNECTION (Global Caching) =====
+// VERCEL-SAFE MONGODB CONNECTION
 let cached = global.mongoose;
 if (!cached) {
     cached = global.mongoose = { conn: null, promise: null };
@@ -34,7 +34,7 @@ async function connectDB() {
     return cached.conn;
 }
 
-// ===== USER MODEL =====
+// USER MODEL
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     credits: { type: Number, default: 10 },
@@ -44,17 +44,17 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
-// ===== HOME ROUTE =====
+// HOME ROUTE
 app.get('/', (req, res) => {
     res.send('Driver Ride Picker Backend is Running!');
 });
 
-// ===== TEST API =====
+// TEST API
 app.get('/api/test', (req, res) => {
     res.json({ success: true, message: 'Android app successfully connected to backend!', timestamp: new Date().toISOString() });
 });
 
-// ===== DB TEST API =====
+// DB TEST API
 app.get('/api/dbtest', async (req, res) => {
     try {
         await connectDB();
@@ -65,7 +65,7 @@ app.get('/api/dbtest', async (req, res) => {
     }
 });
 
-// ===== LOGIN / REGISTER API =====
+// LOGIN / REGISTER API
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { phone } = req.body;
@@ -100,7 +100,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// ===== BALANCE CHECK API =====
+// BALANCE CHECK API
 app.get('/api/user/balance/:phone', async (req, res) => {
     try {
         await connectDB();
