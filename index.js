@@ -1,94 +1,157 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const cors = require('cors');
+const admin = require('firebase-admin');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const MONGODB_URI = "mongodb://kingocta472_db_user:B9rIexKrt0vCX4VL@ac-73kqdqc-shard-00-00.fprt86u.mongodb.net:27017,ac-73kqdqc-shard-00-01.fprt86u.mongodb.net:27017,ac-73kqdqc-shard-00-02.fprt86u.mongodb.net:27017/?ssl=true&replicaSet=atlas-13l5ac-shard-0&authSource=admin&appName=Cluster0";
-
-let cached = global.mongoose;
+// ===== FIREBASE INIT (Vercel-safe, cached) =====
+let cached = global.firebaseCache;
 if (!cached) {
-    cached = global.mongoose = { conn: null, promise: null };
+    cached = global.firebaseCache = { db: null };
 }
 
-async function connectDB() {
-    if (cached.conn) return cached.conn;
-    if (!cached.promise) {
-        cached.promise = mongoose.connect(MONGODB_URI, {
-            bufferCommands: false,
-            serverSelectionTimeoutMS: 30000,
-            socketTimeoutMS: 45000,
+function getDB() {
+    if (cached.db) return cached.db;
+
+    if (!admin.apps.length) {
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                projectId: process.env.FIREBASE_PROJECT_ID,
+                clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+                privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            }),
         });
     }
-    try {
-        cached.conn = await cached.promise;
-    } catch (e) {
-        cached.promise = null;
-        throw e;
-    }
-    return cached.conn;
+    cached.db = admin.firestore();
+    return cached.db;
 }
 
-const userSchema = new mongoose.Schema({
-    phone: { type: String, required: true, unique: true },
-    credits: { type: Number, default: 10 },
-    createdAt: { type: Date, default: Date.now },
-    totalRides: { type: Number, default: 0 }
-});
-
-const User = mongoose.models.User || mongoose.model('User', userSchema);
-
+// ===== HOME =====
 app.get('/', (req, res) => {
     res.send('Driver Ride Picker Backend is Running!');
 });
 
+// ===== TEST API =====
 app.get('/api/test', (req, res) => {
-    res.json({ success: true, message: 'Android app successfully connected to backend!', timestamp: new Date().toISOString() });
+    res.json({
+        success: true,
+        message: 'Android app successfully connected to Firebase backend!',
+        timestamp: new Date().toISOString()
+    });
 });
 
+// ===== DB TEST =====
 app.get('/api/dbtest', async (req, res) => {
     try {
-        await connectDB();
-        const count = await User.countDocuments();
-        res.json({ success: true, message: 'MongoDB connected!', userCount: count });
+        const db = getDB();
+        const snapshot = await db.collection('users').limit(1).get();
+        res.json({
+            success: true,
+            message: 'Firebase Firestore connected!',
+            userCount: snapshot.size
+        });
     } catch (e) {
         res.json({ success: false, message: 'DB Error: ' + e.message });
     }
 });
 
+// ===== LOGIN / REGISTER =====
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { phone } = req.body;
         if (!phone || phone.length < 10) {
             return res.json({ success: false, message: 'Invalid phone number' });
         }
-        await connectDB();
-        let user = await User.findOne({ phone });
+
+        const db = getDB();
+        const userRef = db.collection('users').doc(phone);
+        const userDoc = await userRef.get();
+
+        let userData;
         let isNewUser = false;
-        if (!user) {
-            user = new User({ phone, credits: 10 });
-            await user.save();
+
+        if (!userDoc.exists) {
+            // Naya user - 10 free credits
+            userData = {
+                phone: phone,
+                credits: 10,
+                totalRides: 0,
+                createdAt: admin.firestore.FieldValue.serverTimestamp()
+            };
+            await userRef.set(userData);
             isNewUser = true;
+        } else {
+            userData = userDoc.data();
         }
+
         res.json({
             success: true,
             isNewUser: isNewUser,
             message: isNewUser ? 'Welcome! 10 free credits added.' : 'Welcome back!',
-            user: { phone: user.phone, credits: user.credits, totalRides: user.totalRides }
+            user: {
+                phone: userData.phone,
+                credits: userData.credits,
+                totalRides: userData.totalRides || 0
+            }
         });
     } catch (error) {
         res.json({ success: false, message: 'Server error: ' + error.message });
     }
 });
 
+// ===== BALANCE CHECK =====
 app.get('/api/user/balance/:phone', async (req, res) => {
     try {
-        await connectDB();
-        const user = await User.findOne({ phone: req.params.phone });
-        if (!user) return res.json({ success: false, message: 'User not found' });
-        res.json({ success: true, credits: user.credits, totalRides: user.totalRides });
+        const db = getDB();
+        const userDoc = await db.collection('users').doc(req.params.phone).get();
+
+        if (!userDoc.exists) {
+            return res.json({ success: false, message: 'User not found' });
+        }
+        const data = userDoc.data();
+        res.json({
+            success: true,
+            credits: data.credits,
+            totalRides: data.totalRides || 0
+        });
+    } catch (error) {
+        res.json({ success: false, message: 'Server error: ' + error.message });
+    }
+});
+
+// ===== DEDUCT CREDIT (Bot ke liye) =====
+app.post('/api/ride/deduct-credit', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) {
+            return res.json({ success: false, message: 'Phone required' });
+        }
+
+        const db = getDB();
+        const userRef = db.collection('users').doc(phone);
+        const userDoc = await userRef.get();
+
+        if (!userDoc.exists) {
+            return res.json({ success: false, message: 'User not found' });
+        }
+
+        const data = userDoc.data();
+        if (data.credits <= 0) {
+            return res.json({ success: false, message: 'No credits left. Please recharge.' });
+        }
+
+        await userRef.update({
+            credits: data.credits - 1,
+            totalRides: (data.totalRides || 0) + 1
+        });
+
+        res.json({
+            success: true,
+            message: '1 credit deducted',
+            remainingCredits: data.credits - 1
+        });
     } catch (error) {
         res.json({ success: false, message: 'Server error: ' + error.message });
     }
