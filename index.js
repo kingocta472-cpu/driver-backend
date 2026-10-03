@@ -19,6 +19,14 @@ const REFERRAL_BONUS_CREDITS = 5;
 const MIN_RECHARGE_RUPEES = 10;
 const CREDIT_PER_RUPEE = 1;
 
+// 6-DIGIT PIN AUTH
+const PIN_LENGTH = 6;
+const PIN_MAX_ATTEMPTS = 5;
+const PIN_LOCK_MINUTES = 15;
+
+// Installation identity
+const INSTALL_ID_MAX_LENGTH = 200;
+
 // ============================================================
 // FIREBASE INIT
 // ============================================================
@@ -59,12 +67,16 @@ function getDB() {
                     process.env.FIREBASE_CLIENT_EMAIL,
 
                 privateKey:
-                    privateKey.replace(/\\n/g, '\n')
+                    privateKey.replace(
+                        /\\n/g,
+                        '\n'
+                    )
             })
         });
     }
 
-    cached.db = admin.firestore();
+    cached.db =
+        admin.firestore();
 
     return cached.db;
 }
@@ -97,29 +109,231 @@ function getRazorpay() {
 // ============================================================
 
 function normalizePhone(phone) {
-    if (!phone) return '';
+    if (!phone) {
+        return '';
+    }
 
-    return String(phone)
-        .trim()
-        .replace(/\s+/g, '');
+    const digits =
+        String(phone)
+            .trim()
+            .replace(/\D/g, '');
+
+    // 10 digit Indian number
+    if (
+        digits.length === 10 &&
+        /^[6-9]/.test(digits)
+    ) {
+        return digits;
+    }
+
+    // +91XXXXXXXXXX / 91XXXXXXXXXX
+    if (
+        digits.length === 12 &&
+        digits.startsWith('91') &&
+        /^[6-9]/.test(
+            digits.slice(2)
+        )
+    ) {
+        return digits.slice(2);
+    }
+
+    return '';
 }
 
-function normalizeReferralCode(code) {
-    if (!code) return '';
+function normalizeInstallId(
+    installId
+) {
+    if (!installId) {
+        return '';
+    }
+
+    return String(
+        installId
+    )
+        .trim()
+        .slice(
+            0,
+            INSTALL_ID_MAX_LENGTH
+        );
+}
+
+function normalizeReferralCode(
+    code
+) {
+    if (!code) {
+        return '';
+    }
 
     return String(code)
         .trim()
         .toUpperCase()
-        .replace(/[^A-Z0-9]/g, '');
+        .replace(
+            /[^A-Z0-9]/g,
+            ''
+        );
 }
 
-function isValidRechargeAmount(amount) {
+function isValidRechargeAmount(
+    amount
+) {
     return (
         Number.isFinite(amount) &&
         Number.isInteger(amount) &&
-        amount >= MIN_RECHARGE_RUPEES
+        amount >=
+            MIN_RECHARGE_RUPEES
     );
 }
+
+function isValidPin(pin) {
+    return new RegExp(
+        `^\\d{${PIN_LENGTH}}$`
+    ).test(
+        String(pin || '').trim()
+    );
+}
+
+// ============================================================
+// PIN HASH
+// ============================================================
+
+function createPinHash(
+    pin
+) {
+    const salt =
+        crypto
+            .randomBytes(16)
+            .toString('hex');
+
+    const hash =
+        crypto.scryptSync(
+            String(pin).trim(),
+            salt,
+            64,
+            {
+                N: 16384,
+                r: 8,
+                p: 1,
+                maxmem:
+                    32 *
+                    1024 *
+                    1024
+            }
+        )
+        .toString('hex');
+
+    return {
+        pinSalt: salt,
+        pinHash: hash
+    };
+}
+
+function verifyPinHash(
+    pin,
+    salt,
+    expectedHash
+) {
+    if (
+        !isValidPin(pin) ||
+        !salt ||
+        !expectedHash
+    ) {
+        return false;
+    }
+
+    try {
+        const actual =
+            crypto.scryptSync(
+                String(pin).trim(),
+                String(salt),
+                64,
+                {
+                    N: 16384,
+                    r: 8,
+                    p: 1,
+                    maxmem:
+                        32 *
+                        1024 *
+                        1024
+                }
+            );
+
+        const expected =
+            Buffer.from(
+                String(expectedHash),
+                'hex'
+            );
+
+        return (
+            actual.length ===
+                expected.length &&
+            crypto.timingSafeEqual(
+                actual,
+                expected
+            )
+        );
+
+    } catch (error) {
+
+        console.error(
+            'PIN VERIFY ERROR:',
+            error
+        );
+
+        return false;
+    }
+}
+
+// ============================================================
+// HASH HELPERS
+// ============================================================
+
+function hashInstallId(
+    installId
+) {
+    return crypto
+        .createHash('sha256')
+        .update(
+            `driver-ride-picker-install:${installId}`
+        )
+        .digest('hex');
+}
+
+function hashPhoneForAuth(
+    phone
+) {
+    return crypto
+        .createHash('sha256')
+        .update(
+            `driver-ride-picker-auth:${phone}`
+        )
+        .digest('hex');
+}
+
+// ============================================================
+// STABLE DRIVER FIREBASE UID
+// ============================================================
+
+function generateDriverFirebaseUid(
+    phone
+) {
+    const projectId =
+        process.env.FIREBASE_PROJECT_ID ||
+        'driver-ride-picker';
+
+    const digest =
+        crypto
+            .createHash('sha256')
+            .update(
+                `driver:${projectId}:${phone}`
+            )
+            .digest('hex');
+
+    return `driver_${digest}`;
+}
+
+// ============================================================
+// RAZORPAY HELPERS
+// ============================================================
 
 function generateReceipt() {
     const randomPart =
@@ -127,29 +341,11 @@ function generateReceipt() {
             .randomBytes(6)
             .toString('hex');
 
-    return `drp_${Date.now()}_${randomPart}`.slice(
-        0,
-        40
-    );
-}
-
-function generateReferralCode() {
-    const chars =
-        'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-
-    let code = 'DRP';
-
-    const bytes =
-        crypto.randomBytes(7);
-
-    for (let i = 0; i < 7; i++) {
-        code +=
-            chars[
-                bytes[i] % chars.length
-            ];
-    }
-
-    return code;
+    return `drp_${Date.now()}_${randomPart}`
+        .slice(
+            0,
+            40
+        );
 }
 
 function verifyRazorpaySignature(
@@ -166,9 +362,12 @@ function verifyRazorpaySignature(
         );
     }
 
-    const generatedSignature =
+    const generated =
         crypto
-            .createHmac('sha256', secret)
+            .createHmac(
+                'sha256',
+                secret
+            )
             .update(
                 `${orderId}|${paymentId}`
             )
@@ -176,68 +375,169 @@ function verifyRazorpaySignature(
 
     if (
         !signature ||
-        generatedSignature.length !==
+        generated.length !==
             signature.length
     ) {
         return false;
     }
 
     return crypto.timingSafeEqual(
-        Buffer.from(generatedSignature),
+        Buffer.from(generated),
         Buffer.from(signature)
     );
 }
 
 // ============================================================
-// FIREBASE AUTHENTICATION
+// FIREBASE APP CHECK
 // ============================================================
 
-async function verifyFirebaseToken(req, res, next) {
+function getAppCheckService() {
+
+    if (
+        typeof admin.appCheck ===
+        'function'
+    ) {
+        return admin.appCheck();
+    }
+
+    const appCheckModule =
+        require(
+            'firebase-admin/app-check'
+        );
+
+    return appCheckModule
+        .getAppCheck();
+}
+
+async function verifyAppCheckHeader(
+    req
+) {
+    const appCheckToken =
+        String(
+            req.headers[
+                'x-firebase-appcheck'
+            ] || ''
+        ).trim();
+
+    if (!appCheckToken) {
+        const error =
+            new Error(
+                'Firebase App Check token required.'
+            );
+
+        error.statusCode = 401;
+
+        throw error;
+    }
+
+    return getAppCheckService()
+        .verifyToken(
+            appCheckToken
+        );
+}
+
+// ============================================================
+// FIREBASE ID TOKEN
+// ============================================================
+
+async function decodeFirebaseToken(
+    req
+) {
+    const authorization =
+        String(
+            req.headers.authorization ||
+            ''
+        );
+
+    if (
+        !authorization.startsWith(
+            'Bearer '
+        )
+    ) {
+        const error =
+            new Error(
+                'Firebase authentication token required.'
+            );
+
+        error.statusCode = 401;
+
+        throw error;
+    }
+
+    const idToken =
+        authorization
+            .substring(7)
+            .trim();
+
+    if (!idToken) {
+        const error =
+            new Error(
+                'Firebase authentication token required.'
+            );
+
+        error.statusCode = 401;
+
+        throw error;
+    }
+
+    return admin
+        .auth()
+        .verifyIdToken(
+            idToken
+        );
+}
+
+// ============================================================
+// APP CHECK MIDDLEWARE
+// ============================================================
+
+async function verifyFirebaseAppCheck(
+    req,
+    res,
+    next
+) {
     try {
-        const authorization =
-            String(
-                req.headers.authorization || ''
+
+        req.appCheck =
+            await verifyAppCheckHeader(
+                req
             );
 
-        if (
-            !authorization.startsWith(
-                'Bearer '
-            )
-        ) {
-            return res.status(401).json({
-                success: false,
-                message:
-                    'Firebase authentication token required.'
-            });
-        }
+        next();
 
-        const idToken =
-            authorization
-                .substring(7)
-                .trim();
+    } catch (error) {
 
-        if (!idToken) {
-            return res.status(401).json({
-                success: false,
-                message:
-                    'Firebase authentication token required.'
-            });
-        }
+        console.error(
+            'FIREBASE APP CHECK ERROR:',
+            error
+        );
 
-        const decodedToken =
-            await admin
-                .auth()
-                .verifyIdToken(idToken);
+        res.status(401).json({
+            success: false,
+            message:
+                error.message ||
+                'Invalid or expired Firebase App Check token.'
+        });
+    }
+}
 
-        const firebaseUid =
-            decodedToken.uid;
+// ============================================================
+// FIREBASE IDENTITY MIDDLEWARE
+// ============================================================
 
-        const firebasePhone =
-            normalizePhone(
-                decodedToken.phone_number
+async function verifyFirebaseIdentity(
+    req,
+    res,
+    next
+) {
+    try {
+
+        const decoded =
+            await decodeFirebaseToken(
+                req
             );
 
-        if (!firebaseUid) {
+        if (!decoded.uid) {
             return res.status(401).json({
                 success: false,
                 message:
@@ -245,50 +545,193 @@ async function verifyFirebaseToken(req, res, next) {
             });
         }
 
-        if (!firebasePhone) {
-            return res.status(401).json({
-                success: false,
-                message:
-                    'Firebase phone number is missing.'
-            });
-        }
-
         req.firebaseUser = {
-            uid: firebaseUid,
-            phone: firebasePhone,
-            decodedToken: decodedToken
+            uid:
+                decoded.uid,
+
+            signInProvider:
+                decoded.firebase &&
+                decoded.firebase
+                    .sign_in_provider
+                    ? String(
+                        decoded.firebase
+                            .sign_in_provider
+                    )
+                    : '',
+
+            decodedToken:
+                decoded
         };
 
         next();
 
     } catch (error) {
+
         console.error(
-            'FIREBASE TOKEN ERROR:',
+            'FIREBASE IDENTITY ERROR:',
             error
         );
 
-        return res.status(401).json({
+        res.status(
+            error.statusCode ||
+            401
+        ).json({
             success: false,
             message:
+                error.message ||
                 'Invalid or expired Firebase authentication token.'
         });
     }
 }
 
 // ============================================================
-// AUTHENTICATED PHONE CHECK
+// AUTHENTICATED DRIVER MIDDLEWARE
 // ============================================================
 
-function getAuthenticatedPhone(req) {
-    if (
-        !req.firebaseUser ||
-        !req.firebaseUser.phone
-    ) {
-        return '';
-    }
+async function verifyFirebaseToken(
+    req,
+    res,
+    next
+) {
+    try {
 
+        // -------------------------
+        // APP CHECK
+        // -------------------------
+
+        req.appCheck =
+            await verifyAppCheckHeader(
+                req
+            );
+
+        // -------------------------
+        // FIREBASE ID TOKEN
+        // -------------------------
+
+        const decoded =
+            await decodeFirebaseToken(
+                req
+            );
+
+        if (!decoded.uid) {
+            return res.status(401).json({
+                success: false,
+                message:
+                    'Invalid Firebase user.'
+            });
+        }
+
+        const signInProvider =
+            decoded.firebase &&
+            decoded.firebase
+                .sign_in_provider
+                ? String(
+                    decoded.firebase
+                        .sign_in_provider
+                )
+                : '';
+
+        // Anonymous account is only
+        // allowed for bootstrap login.
+        if (
+            signInProvider ===
+            'anonymous'
+        ) {
+            return res.status(401).json({
+                success: false,
+                message:
+                    'Driver PIN authentication required.'
+            });
+        }
+
+        // -------------------------
+        // FIND DRIVER
+        // -------------------------
+
+        const db =
+            getDB();
+
+        const snapshot =
+            await db
+                .collection(
+                    'users'
+                )
+                .where(
+                    'firebaseUid',
+                    '==',
+                    decoded.uid
+                )
+                .limit(1)
+                .get();
+
+        if (
+            snapshot.empty
+        ) {
+            return res.status(401).json({
+                success: false,
+                message:
+                    'Driver account authentication required.'
+            });
+        }
+
+        const userDoc =
+            snapshot.docs[0];
+
+        const userData =
+            userDoc.data() || {};
+
+        req.firebaseUser = {
+
+            uid:
+                decoded.uid,
+
+            phone:
+                normalizePhone(
+                    userData.phone ||
+                    userDoc.id
+                ),
+
+            signInProvider:
+                signInProvider,
+
+            decodedToken:
+                decoded,
+
+            userData:
+                userData
+        };
+
+        req.driverUser =
+            userData;
+
+        next();
+
+    } catch (error) {
+
+        console.error(
+            'FIREBASE TOKEN ERROR:',
+            error
+        );
+
+        res.status(401).json({
+            success: false,
+            message:
+                error.message ||
+                'Invalid or expired Firebase authentication token.'
+        });
+    }
+}
+
+// ============================================================
+// AUTHENTICATED PHONE
+// ============================================================
+
+function getAuthenticatedPhone(
+    req
+) {
     return normalizePhone(
-        req.firebaseUser.phone
+        req.firebaseUser?.phone ||
+        ''
     );
 }
 
@@ -297,70 +740,290 @@ function phoneMatchesAuthenticatedUser(
     suppliedPhone
 ) {
     const authenticatedPhone =
-        getAuthenticatedPhone(req);
+        getAuthenticatedPhone(
+            req
+        );
 
     const phone =
-        normalizePhone(suppliedPhone);
+        normalizePhone(
+            suppliedPhone
+        );
 
-    return (
+    return Boolean(
         authenticatedPhone &&
         phone &&
-        authenticatedPhone === phone
+        authenticatedPhone ===
+            phone
     );
 }
 
 // ============================================================
-// REFERRAL CODE RESERVATION
+// PIN LOCK
+// ============================================================
+
+async function getPinLockState(
+    db,
+    phone
+) {
+    const ref =
+        db
+            .collection(
+                'authAttempts'
+            )
+            .doc(
+                hashPhoneForAuth(
+                    phone
+                )
+            );
+
+    const snapshot =
+        await ref.get();
+
+    if (!snapshot.exists) {
+        return {
+            locked: false,
+            lockedUntilMs: 0
+        };
+    }
+
+    const data =
+        snapshot.data() || {};
+
+    const lockedUntilMs =
+        Number(
+            data.lockedUntilMs ||
+            0
+        );
+
+    return {
+        locked:
+            lockedUntilMs >
+            Date.now(),
+
+        lockedUntilMs:
+            lockedUntilMs
+    };
+}
+
+async function recordPinFailure(
+    db,
+    phone
+) {
+    const ref =
+        db
+            .collection(
+                'authAttempts'
+            )
+            .doc(
+                hashPhoneForAuth(
+                    phone
+                )
+            );
+
+    let result = {
+        failures: 1,
+        locked: false,
+        lockedUntilMs: 0
+    };
+
+    await db.runTransaction(
+        async transaction => {
+
+            const snapshot =
+                await transaction.get(
+                    ref
+                );
+
+            const data =
+                snapshot.exists
+                    ? (
+                        snapshot.data() ||
+                        {}
+                    )
+                    : {};
+
+            const now =
+                Date.now();
+
+            const existingLockUntil =
+                Number(
+                    data.lockedUntilMs ||
+                    0
+                );
+
+            if (
+                existingLockUntil >
+                now
+            ) {
+
+                result = {
+                    failures:
+                        Number(
+                            data.failures ||
+                            0
+                        ),
+
+                    locked:
+                        true,
+
+                    lockedUntilMs:
+                        existingLockUntil
+                };
+
+                return;
+            }
+
+            const failures =
+                Number(
+                    data.failures ||
+                    0
+                ) + 1;
+
+            const locked =
+                failures >=
+                PIN_MAX_ATTEMPTS;
+
+            const lockedUntilMs =
+                locked
+                    ? (
+                        now +
+                        PIN_LOCK_MINUTES *
+                        60 *
+                        1000
+                    )
+                    : 0;
+
+            transaction.set(
+                ref,
+                {
+                    failures:
+                        failures,
+
+                    lockedUntilMs:
+                        lockedUntilMs,
+
+                    lastFailedAt:
+                        admin.firestore
+                            .FieldValue
+                            .serverTimestamp()
+                },
+                {
+                    merge: true
+                }
+            );
+
+            result = {
+                failures:
+                    failures,
+
+                locked:
+                    locked,
+
+                lockedUntilMs:
+                    lockedUntilMs
+            };
+        }
+    );
+
+    return result;
+}
+
+async function clearPinFailures(
+    db,
+    phone
+) {
+    await db
+        .collection(
+            'authAttempts'
+        )
+        .doc(
+            hashPhoneForAuth(
+                phone
+            )
+        )
+        .delete();
+}
+
+// ============================================================
+// UNIQUE REFERRAL CODE
 // ============================================================
 
 async function createUniqueReferralCode(
     db,
     userRef
 ) {
-    for (let attempt = 0; attempt < 10; attempt++) {
+    for (
+        let attempt = 0;
+        attempt < 10;
+        attempt++
+    ) {
+
         const code =
             generateReferralCode();
 
         const codeRef =
             db
-                .collection('referralCodes')
+                .collection(
+                    'referralCodes'
+                )
                 .doc(code);
 
         const existing =
             await codeRef.get();
 
-        if (existing.exists) {
+        if (
+            existing.exists
+        ) {
             continue;
         }
 
-        await db.runTransaction(
-            async (transaction) => {
-                const freshCode =
-                    await transaction.get(
-                        codeRef
-                    );
+        try {
 
-                if (freshCode.exists) {
-                    throw new Error(
-                        'REFERRAL_CODE_COLLISION'
+            await db.runTransaction(
+                async transaction => {
+
+                    const freshCode =
+                        await transaction.get(
+                            codeRef
+                        );
+
+                    if (
+                        freshCode.exists
+                    ) {
+                        throw new Error(
+                            'REFERRAL_CODE_COLLISION'
+                        );
+                    }
+
+                    transaction.set(
+                        codeRef,
+                        {
+                            code:
+                                code,
+
+                            userId:
+                                userRef.id,
+
+                            createdAt:
+                                admin.firestore
+                                    .FieldValue
+                                    .serverTimestamp()
+                        }
                     );
                 }
+            );
 
-                transaction.set(
-                    codeRef,
-                    {
-                        code: code,
-                        userId: userRef.id,
-                        createdAt:
-                            admin.firestore
-                                .FieldValue
-                                .serverTimestamp()
-                    }
-                );
+            return code;
+
+        } catch (error) {
+
+            if (
+                error.message !==
+                'REFERRAL_CODE_COLLISION'
+            ) {
+                throw error;
             }
-        );
-
-        return code;
+        }
     }
 
     throw new Error(
@@ -372,25 +1035,36 @@ async function createUniqueReferralCode(
 // HOME
 // ============================================================
 
-app.get('/', (req, res) => {
-    res.send(
-        'Driver Ride Picker Backend is Running!'
-    );
-});
+app.get(
+    '/',
+    (req, res) => {
+        res.send(
+            'Driver Ride Picker Backend is Running!'
+        );
+    }
+);
 
 // ============================================================
 // TEST API
 // ============================================================
 
-app.get('/api/test', (req, res) => {
-    res.json({
-        success: true,
-        message:
-            'Android app successfully connected to Firebase backend!',
-        timestamp:
-            new Date().toISOString()
-    });
-});
+app.get(
+    '/api/test',
+    (req, res) => {
+
+        res.json({
+            success:
+                true,
+
+            message:
+                'Android app successfully connected to Firebase backend!',
+
+            timestamp:
+                new Date()
+                    .toISOString()
+        });
+    }
+);
 
 // ============================================================
 // DB TEST
@@ -399,31 +1073,39 @@ app.get('/api/test', (req, res) => {
 app.get(
     '/api/dbtest',
     async (req, res) => {
+
         try {
-            const db = getDB();
 
             const snapshot =
-                await db
-                    .collection('users')
+                await getDB()
+                    .collection(
+                        'users'
+                    )
                     .limit(1)
                     .get();
 
             res.json({
-                success: true,
+                success:
+                    true,
+
                 message:
                     'Firebase Firestore connected!',
+
                 userCount:
                     snapshot.size
             });
 
         } catch (error) {
+
             console.error(
                 'DB TEST ERROR:',
                 error
             );
 
             res.status(500).json({
-                success: false,
+                success:
+                    false,
+
                 message:
                     'DB Error: ' +
                     error.message
@@ -434,79 +1116,372 @@ app.get(
 
 // ============================================================
 // LOGIN / REGISTER
-// ============================================================
-// Firebase OTP authentication happens in Android.
-// Backend verifies the Firebase ID token here.
-//
-// Optional:
-// referralCode
-//
-// New driver:
-// 10 free credits
-//
-// Valid referral:
-// referrer +5 credits
+// MOBILE NUMBER + 6-DIGIT PIN
 // ============================================================
 
 app.post(
     '/api/auth/login',
-    verifyFirebaseToken,
+    verifyFirebaseAppCheck,
+    verifyFirebaseIdentity,
     async (req, res) => {
+
         try {
-            const phone =
-                getAuthenticatedPhone(req);
+
+            // --------------------------------
+            // ONLY ANONYMOUS USER CAN BOOTSTRAP
+            // --------------------------------
 
             if (
-                !phone ||
-                phone.length < 10
+                req.firebaseUser
+                    .signInProvider !==
+                'anonymous'
             ) {
-                return res.status(400).json({
-                    success: false,
+                return res.status(401).json({
+                    success:
+                        false,
+
                     message:
-                        'Invalid Firebase phone number.'
+                        'Firebase anonymous authentication required.'
                 });
             }
 
-            const firebaseUid =
-                req.firebaseUser.uid;
+            // --------------------------------
+            // REQUEST DATA
+            // --------------------------------
+
+            const phone =
+                normalizePhone(
+                    req.body.phone
+                );
+
+            const pin =
+                String(
+                    req.body.pin ||
+                    ''
+                ).trim();
 
             const referralCode =
                 normalizeReferralCode(
                     req.body.referralCode
                 );
 
-            const db = getDB();
+            const installId =
+                normalizeInstallId(
+                    req.body.installId
+                );
+
+            // --------------------------------
+            // VALIDATE PHONE
+            // --------------------------------
+
+            if (!phone) {
+                return res.status(400).json({
+                    success:
+                        false,
+
+                    message:
+                        'Please enter a valid 10-digit Indian mobile number.'
+                });
+            }
+
+            // --------------------------------
+            // VALIDATE PIN
+            // --------------------------------
+
+            if (
+                !isValidPin(pin)
+            ) {
+                return res.status(400).json({
+                    success:
+                        false,
+
+                    message:
+                        'PIN must be exactly 6 digits.'
+                });
+            }
+
+            // --------------------------------
+            // VALIDATE INSTALLATION ID
+            // --------------------------------
+
+            if (!installId) {
+                return res.status(400).json({
+                    success:
+                        false,
+
+                    message:
+                        'App installation identity required.'
+                });
+            }
+
+            const db =
+                getDB();
+
+            // --------------------------------
+            // PIN LOCK CHECK
+            // --------------------------------
+
+            const lockState =
+                await getPinLockState(
+                    db,
+                    phone
+                );
+
+            if (
+                lockState.locked
+            ) {
+
+                const remainingMinutes =
+                    Math.max(
+                        1,
+                        Math.ceil(
+                            (
+                                lockState.lockedUntilMs -
+                                Date.now()
+                            ) /
+                            (
+                                60 *
+                                1000
+                            )
+                        )
+                    );
+
+                return res.status(429).json({
+                    success:
+                        false,
+
+                    message:
+                        `Too many wrong PIN attempts. Try again in ${remainingMinutes} minute(s).`
+                });
+            }
+
+            // --------------------------------
+            // USER
+            // --------------------------------
 
             const userRef =
                 db
-                    .collection('users')
-                    .doc(phone);
+                    .collection(
+                        'users'
+                    )
+                    .doc(
+                        phone
+                    );
 
             const existingUserDoc =
                 await userRef.get();
 
-            let isNewUser = false;
-            let userData;
+            const driverFirebaseUid =
+                generateDriverFirebaseUid(
+                    phone
+                );
 
-            if (!existingUserDoc.exists) {
+            let isNewUser =
+                false;
+
+            let trialCreditsAdded =
+                0;
+
+            let pinWasCreated =
+                false;
+
+            let userData =
+                null;
+
+            // ========================================================
+            // EXISTING USER
+            // ========================================================
+
+            if (
+                existingUserDoc.exists
+            ) {
+
+                userData =
+                    existingUserDoc.data() ||
+                    {};
+
+                const updates =
+                    {};
+
+                // --------------------------------
+                // EXISTING PIN
+                // --------------------------------
+
+                if (
+                    userData.pinHash &&
+                    userData.pinSalt
+                ) {
+
+                    const validPin =
+                        verifyPinHash(
+                            pin,
+                            userData.pinSalt,
+                            userData.pinHash
+                        );
+
+                    if (
+                        !validPin
+                    ) {
+
+                        const failure =
+                            await recordPinFailure(
+                                db,
+                                phone
+                            );
+
+                        if (
+                            failure.locked
+                        ) {
+
+                            return res.status(429).json({
+                                success:
+                                    false,
+
+                                message:
+                                    `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.`
+                            });
+                        }
+
+                        return res.status(401).json({
+                            success:
+                                false,
+
+                            message:
+                                'Invalid mobile number or PIN.'
+                        });
+                    }
+
+                } else {
+
+                    // --------------------------------
+                    // OLD ACCOUNT WITHOUT PIN
+                    // --------------------------------
+
+                    const pinData =
+                        createPinHash(
+                            pin
+                        );
+
+                    updates.pinSalt =
+                        pinData.pinSalt;
+
+                    updates.pinHash =
+                        pinData.pinHash;
+
+                    updates.pinCreatedAt =
+                        admin.firestore
+                            .FieldValue
+                            .serverTimestamp();
+
+                    pinWasCreated =
+                        true;
+                }
+
+                // --------------------------------
+                // REPAIR OLD FIELDS
+                // --------------------------------
+
+                if (
+                    typeof userData
+                        .credits !==
+                    'number'
+                ) {
+                    updates.credits =
+                        Number(
+                            userData
+                                .credits ||
+                            0
+                        );
+                }
+
+                if (
+                    typeof userData
+                        .totalRides !==
+                    'number'
+                ) {
+                    updates.totalRides =
+                        Number(
+                            userData
+                                .totalRides ||
+                            0
+                        );
+                }
+
+                // --------------------------------
+                // STABLE FIREBASE UID
+                // --------------------------------
+
+                updates.firebaseUid =
+                    driverFirebaseUid;
+
+                updates.authMethod =
+                    'pin';
+
+                // --------------------------------
+                // OLD USER GETS REFERRAL CODE
+                // --------------------------------
+
+                if (
+                    !userData.referralCode
+                ) {
+
+                    updates.referralCode =
+                        await createUniqueReferralCode(
+                            db,
+                            userRef
+                        );
+                }
+
+                updates.updatedAt =
+                    admin.firestore
+                        .FieldValue
+                        .serverTimestamp();
+
+                await userRef.update(
+                    updates
+                );
+
+                userData = {
+                    ...userData,
+                    ...updates
+                };
+
+            } else {
+
                 // ====================================================
                 // NEW USER
                 // ====================================================
 
-                let newReferralCode =
-                    '';
+                isNewUser =
+                    true;
 
-                // Generate permanent unique referral code.
-                newReferralCode =
+                // --------------------------------
+                // UNIQUE REFERRAL CODE
+                // --------------------------------
+
+                const newReferralCode =
                     await createUniqueReferralCode(
                         db,
                         userRef
                     );
 
-                let referralApplied = false;
-                let referrerPhone = '';
+                let referralApplied =
+                    false;
 
-                if (referralCode) {
+                let referrerPhone =
+                    '';
+
+                let referralLedgerRef =
+                    null;
+
+                // --------------------------------
+                // REFERRAL CHECK
+                // --------------------------------
+
+                if (
+                    referralCode
+                ) {
+
                     const referralRef =
                         db
                             .collection(
@@ -519,104 +1494,224 @@ app.post(
                     const referralDoc =
                         await referralRef.get();
 
-                    if (referralDoc.exists) {
+                    if (
+                        referralDoc.exists
+                    ) {
+
                         const referralData =
-                            referralDoc.data();
+                            referralDoc.data() ||
+                            {};
 
                         referrerPhone =
                             normalizePhone(
                                 referralData.userId
                             );
 
-                        // Self-referral protection.
+                        // SELF REFERRAL BLOCK
                         if (
                             referrerPhone &&
                             referrerPhone !==
                                 phone
                         ) {
+
                             referralApplied =
                                 true;
+
+                            referralLedgerRef =
+                                db
+                                    .collection(
+                                        'referralRewards'
+                                    )
+                                    .doc(
+                                        `${referrerPhone}_${phone}`
+                                    );
+
                         } else {
+
                             referrerPhone =
                                 '';
                         }
                     }
                 }
 
-                const newUserData = {
-                    phone: phone,
+                // --------------------------------
+                // CREATE PIN HASH
+                // --------------------------------
 
-                    firebaseUid:
-                        firebaseUid,
+                const pinData =
+                    createPinHash(
+                        pin
+                    );
 
-                    credits:
-                        FREE_START_CREDITS,
+                // --------------------------------
+                // ONE-TIME TRIAL
+                // --------------------------------
 
-                    totalRides: 0,
-
-                    referralCode:
-                        newReferralCode,
-
-                    referredBy:
-                        referralApplied
-                            ? referrerPhone
-                            : null,
-
-                    referralApplied:
-                        referralApplied,
-
-                    createdAt:
-                        admin.firestore
-                            .FieldValue
-                            .serverTimestamp(),
-
-                    updatedAt:
-                        admin.firestore
-                            .FieldValue
-                            .serverTimestamp()
-                };
-
-                const referralLedgerRef =
-                    referralApplied
-                        ? db
-                            .collection(
-                                'referralRewards'
+                const trialClaimRef =
+                    db
+                        .collection(
+                            'trialClaims'
+                        )
+                        .doc(
+                            hashInstallId(
+                                installId
                             )
-                            .doc(
-                                `${referrerPhone}_${phone}`
-                            )
-                        : null;
-
-                await db.runTransaction(
-                    async (transaction) => {
-                        const freshUser =
-                            await transaction.get(
-                                userRef
-                            );
-
-                        if (
-                            freshUser.exists
-                        ) {
-                            return;
-                        }
-
-                        transaction.set(
-                            userRef,
-                            newUserData
                         );
 
-                        if (
-                            referralApplied &&
-                            referralLedgerRef
-                        ) {
-                            const freshLedger =
+                const transactionResult =
+                    await db.runTransaction(
+                        async transaction => {
+
+                            const freshUser =
                                 await transaction.get(
-                                    referralLedgerRef
+                                    userRef
                                 );
 
+                            // Race protection
                             if (
-                                !freshLedger.exists
+                                freshUser.exists
                             ) {
+                                return {
+                                    created:
+                                        false,
+
+                                    trialGranted:
+                                        false
+                                };
+                            }
+
+                            const trialDoc =
+                                await transaction.get(
+                                    trialClaimRef
+                                );
+
+                            let ledgerDoc =
+                                null;
+
+                            if (
+                                referralLedgerRef
+                            ) {
+                                ledgerDoc =
+                                    await transaction.get(
+                                        referralLedgerRef
+                                    );
+                            }
+
+                            const trialGranted =
+                                !trialDoc.exists;
+
+                            const startingCredits =
+                                trialGranted
+                                    ? FREE_START_CREDITS
+                                    : 0;
+
+                            // --------------------------------
+                            // CREATE USER
+                            // --------------------------------
+
+                            transaction.set(
+                                userRef,
+                                {
+                                    phone:
+                                        phone,
+
+                                    firebaseUid:
+                                        driverFirebaseUid,
+
+                                    credits:
+                                        startingCredits,
+
+                                    totalRides:
+                                        0,
+
+                                    referralCode:
+                                        newReferralCode,
+
+                                    referredBy:
+                                        referralApplied
+                                            ? referrerPhone
+                                            : null,
+
+                                    referralApplied:
+                                        referralApplied,
+
+                                    pinSalt:
+                                        pinData.pinSalt,
+
+                                    pinHash:
+                                        pinData.pinHash,
+
+                                    authMethod:
+                                        'pin',
+
+                                    trialClaimed:
+                                        trialGranted,
+
+                                    trialInstallIdHash:
+                                        hashInstallId(
+                                            installId
+                                        ),
+
+                                    createdAt:
+                                        admin.firestore
+                                            .FieldValue
+                                            .serverTimestamp(),
+
+                                    pinCreatedAt:
+                                        admin.firestore
+                                            .FieldValue
+                                            .serverTimestamp(),
+
+                                    updatedAt:
+                                        admin.firestore
+                                            .FieldValue
+                                            .serverTimestamp()
+                                }
+                            );
+
+                            // --------------------------------
+                            // SAVE TRIAL CLAIM
+                            // --------------------------------
+
+                            if (
+                                trialGranted
+                            ) {
+
+                                transaction.set(
+                                    trialClaimRef,
+                                    {
+                                        installIdHash:
+                                            hashInstallId(
+                                                installId
+                                            ),
+
+                                        firstPhone:
+                                            phone,
+
+                                        creditsGranted:
+                                            FREE_START_CREDITS,
+
+                                        createdAt:
+                                            admin.firestore
+                                                .FieldValue
+                                                .serverTimestamp()
+                                    }
+                                );
+                            }
+
+                            // --------------------------------
+                            // REFERRAL LEDGER
+                            // --------------------------------
+
+                            if (
+                                referralApplied &&
+                                referralLedgerRef &&
+                                (
+                                    !ledgerDoc ||
+                                    !ledgerDoc.exists
+                                )
+                            ) {
+
                                 transaction.set(
                                     referralLedgerRef,
                                     {
@@ -630,190 +1725,111 @@ app.post(
                                             REFERRAL_BONUS_CREDITS,
 
                                         status:
-                                            'pending'
+                                            'pending',
+
+                                        createdAt:
+                                            admin.firestore
+                                                .FieldValue
+                                                .serverTimestamp()
                                     }
                                 );
                             }
-                        }
-                    }
-                );
 
-                // ====================================================
-                // APPLY REFERRAL BONUS ATOMICALLY
-                // ====================================================
+                            return {
+                                created:
+                                    true,
 
-                if (referralApplied) {
-                    const referrerRef =
-                        db
-                            .collection('users')
-                            .doc(
-                                referrerPhone
-                            );
-
-                    const ledgerRef =
-                        db
-                            .collection(
-                                'referralRewards'
-                            )
-                            .doc(
-                                `${referrerPhone}_${phone}`
-                            );
-
-                    await db.runTransaction(
-                        async (
-                            transaction
-                        ) => {
-                            const [
-                                referrerDoc,
-                                ledgerDoc
-                            ] =
-                                await Promise.all([
-                                    transaction.get(
-                                        referrerRef
-                                    ),
-                                    transaction.get(
-                                        ledgerRef
-                                    )
-                                ]);
-
-                            if (
-                                !referrerDoc.exists
-                            ) {
-                                return;
-                            }
-
-                            if (
-                                !ledgerDoc.exists
-                            ) {
-                                return;
-                            }
-
-                            const ledgerData =
-                                ledgerDoc.data();
-
-                            if (
-                                ledgerData.status ===
-                                'rewarded'
-                            ) {
-                                return;
-                            }
-
-                            const referrerData =
-                                referrerDoc.data();
-
-                            const currentCredits =
-                                Number(
-                                    referrerData.credits ||
-                                        0
-                                );
-
-                            const updatedCredits =
-                                currentCredits +
-                                REFERRAL_BONUS_CREDITS;
-
-                            transaction.update(
-                                referrerRef,
-                                {
-                                    credits:
-                                        updatedCredits,
-
-                                    updatedAt:
-                                        admin
-                                            .firestore
-                                            .FieldValue
-                                            .serverTimestamp()
-                                }
-                            );
-
-                            transaction.update(
-                                ledgerRef,
-                                {
-                                    status:
-                                        'rewarded',
-
-                                    rewardedAt:
-                                        admin
-                                            .firestore
-                                            .FieldValue
-                                            .serverTimestamp()
-                                }
-                            );
+                                trialGranted:
+                                    trialGranted
+                            };
                         }
                     );
-                }
 
-                const finalUserDoc =
-                    await userRef.get();
-
-                userData =
-                    finalUserDoc.data() ||
-                    newUserData;
-
-                isNewUser = true;
-
-            } else {
                 // ====================================================
-                // EXISTING USER
+                // RACE CONDITION
                 // ====================================================
 
-                userData =
-                    existingUserDoc.data();
-
-                const updates = {};
-
                 if (
-                    typeof userData.credits !==
-                    'number'
+                    !transactionResult.created
                 ) {
-                    updates.credits =
-                        Number(
-                            userData.credits ||
-                                0
-                        );
-                }
 
-                if (
-                    typeof userData.totalRides !==
-                    'number'
-                ) {
-                    updates.totalRides =
-                        Number(
-                            userData.totalRides ||
-                                0
-                        );
-                }
+                    const racedUser =
+                        await userRef.get();
 
-                if (
-                    !userData.firebaseUid
-                ) {
-                    updates.firebaseUid =
-                        firebaseUid;
-                }
+                    if (
+                        !racedUser.exists
+                    ) {
+                        return res.status(409).json({
+                            success:
+                                false,
 
-                // Existing drivers get a referral code
-                // if old account was created before
-                // referral system.
-                if (
-                    !userData.referralCode
-                ) {
-                    const code =
-                        await createUniqueReferralCode(
-                            db,
-                            userRef
-                        );
+                            message:
+                                'Account creation conflict. Please try again.'
+                        });
+                    }
 
-                    updates.referralCode =
-                        code;
-                }
+                    userData =
+                        racedUser.data() ||
+                        {};
 
-                if (
-                    Object.keys(updates)
-                        .length > 0
-                ) {
-                    updates.updatedAt =
-                        admin.firestore
-                            .FieldValue
-                            .serverTimestamp();
+                    // Existing race-created PIN
+                    if (
+                        userData.pinHash &&
+                        userData.pinSalt
+                    ) {
+
+                        const validPin =
+                            verifyPinHash(
+                                pin,
+                                userData.pinSalt,
+                                userData.pinHash
+                            );
+
+                        if (
+                            !validPin
+                        ) {
+
+                            const failure =
+                                await recordPinFailure(
+                                    db,
+                                    phone
+                                );
+
+                            if (
+                                failure.locked
+                            ) {
+
+                                return res.status(429).json({
+                                    success:
+                                        false,
+
+                                    message:
+                                        `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.`
+                                });
+                            }
+
+                            return res.status(401).json({
+                                success:
+                                    false,
+
+                                message:
+                                    'Invalid mobile number or PIN.'
+                            });
+                        }
+                    }
+
+                    const updates = {
+                        firebaseUid:
+                            driverFirebaseUid,
+
+                        authMethod:
+                            'pin',
+
+                        updatedAt:
+                            admin.firestore
+                                .FieldValue
+                                .serverTimestamp()
+                    };
 
                     await userRef.update(
                         updates
@@ -823,37 +1839,208 @@ app.post(
                         ...userData,
                         ...updates
                     };
+
+                    isNewUser =
+                        false;
+
+                } else {
+
+                    // --------------------------------
+                    // TRIAL CREDITS
+                    // --------------------------------
+
+                    if (
+                        transactionResult
+                            .trialGranted
+                    ) {
+
+                        trialCreditsAdded =
+                            FREE_START_CREDITS;
+                    }
+
+                    // ================================================
+                    // REFERRER +5 CREDIT
+                    // ================================================
+
+                    if (
+                        referralApplied &&
+                        referralLedgerRef
+                    ) {
+
+                        const referrerRef =
+                            db
+                                .collection(
+                                    'users'
+                                )
+                                .doc(
+                                    referrerPhone
+                                );
+
+                        await db.runTransaction(
+                            async transaction => {
+
+                                const referrerDoc =
+                                    await transaction.get(
+                                        referrerRef
+                                    );
+
+                                const ledgerDoc =
+                                    await transaction.get(
+                                        referralLedgerRef
+                                    );
+
+                                if (
+                                    !referrerDoc.exists ||
+                                    !ledgerDoc.exists
+                                ) {
+                                    return;
+                                }
+
+                                const ledgerData =
+                                    ledgerDoc.data() ||
+                                    {};
+
+                                if (
+                                    ledgerData.status ===
+                                    'rewarded'
+                                ) {
+                                    return;
+                                }
+
+                                const referrerData =
+                                    referrerDoc.data() ||
+                                    {};
+
+                                const currentCredits =
+                                    Number(
+                                        referrerData
+                                            .credits ||
+                                        0
+                                    );
+
+                                const updatedCredits =
+                                    currentCredits +
+                                    REFERRAL_BONUS_CREDITS;
+
+                                transaction.update(
+                                    referrerRef,
+                                    {
+                                        credits:
+                                            updatedCredits,
+
+                                        updatedAt:
+                                            admin.firestore
+                                                .FieldValue
+                                                .serverTimestamp()
+                                    }
+                                );
+
+                                transaction.update(
+                                    referralLedgerRef,
+                                    {
+                                        status:
+                                            'rewarded',
+
+                                        rewardedAt:
+                                            admin.firestore
+                                                .FieldValue
+                                                .serverTimestamp()
+                                    }
+                                );
+                            }
+                        );
+                    }
+
+                    const finalUserDoc =
+                        await userRef.get();
+
+                    userData =
+                        finalUserDoc.data() ||
+                        {};
                 }
             }
 
-            res.json({
-                success: true,
+            // --------------------------------
+            // CLEAR FAILED ATTEMPTS
+            // --------------------------------
+
+            await clearPinFailures(
+                db,
+                phone
+            );
+
+            // --------------------------------
+            // FIREBASE CUSTOM TOKEN
+            // --------------------------------
+
+            const firebaseCustomToken =
+                await admin
+                    .auth()
+                    .createCustomToken(
+                        driverFirebaseUid,
+                        {
+                            driver:
+                                true
+                        }
+                    );
+
+            // --------------------------------
+            // FINAL RESPONSE
+            // --------------------------------
+
+            return res.json({
+
+                success:
+                    true,
 
                 isNewUser:
                     isNewUser,
 
+                trialCreditsAdded:
+                    trialCreditsAdded,
+
+                pinWasCreated:
+                    pinWasCreated,
+
+                authMethod:
+                    'pin',
+
+                firebaseCustomToken:
+                    firebaseCustomToken,
+
                 message:
                     isNewUser
-                        ? 'Welcome! 10 free credits added.'
-                        : 'Welcome back!',
+                        ? (
+                            trialCreditsAdded >
+                            0
+                                ? 'Welcome! 10 free credits added.'
+                                : 'Account created. This installation has already used the free trial.'
+                        )
+                        : (
+                            pinWasCreated
+                                ? 'PIN created successfully. Welcome back!'
+                                : 'Welcome back!'
+                        ),
 
                 user: {
+
                     phone:
-                        userData.phone,
+                        userData.phone ||
+                        phone,
 
                     firebaseUid:
-                        userData.firebaseUid,
+                        driverFirebaseUid,
 
                     credits:
                         Number(
                             userData.credits ||
-                                0
+                            0
                         ),
 
                     totalRides:
                         Number(
                             userData.totalRides ||
-                                0
+                            0
                         ),
 
                     referralCode:
@@ -863,13 +2050,16 @@ app.post(
             });
 
         } catch (error) {
+
             console.error(
-                'LOGIN ERROR:',
+                'PIN LOGIN ERROR:',
                 error
             );
 
-            res.status(500).json({
-                success: false,
+            return res.status(500).json({
+                success:
+                    false,
+
                 message:
                     'Server error: ' +
                     error.message
@@ -886,31 +2076,47 @@ app.get(
     '/api/referral/me',
     verifyFirebaseToken,
     async (req, res) => {
-        try {
-            const phone =
-                getAuthenticatedPhone(req);
 
-            const db = getDB();
+        try {
+
+            const phone =
+                getAuthenticatedPhone(
+                    req
+                );
+
+            const db =
+                getDB();
 
             const userDoc =
                 await db
-                    .collection('users')
-                    .doc(phone)
+                    .collection(
+                        'users'
+                    )
+                    .doc(
+                        phone
+                    )
                     .get();
 
-            if (!userDoc.exists) {
+            if (
+                !userDoc.exists
+            ) {
+
                 return res.status(404).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'User not found'
                 });
             }
 
             const data =
-                userDoc.data();
+                userDoc.data() ||
+                {};
 
             const referralCode =
-                data.referralCode || '';
+                data.referralCode ||
+                '';
 
             const rewardsSnapshot =
                 await db
@@ -930,7 +2136,9 @@ app.get(
                     .get();
 
             res.json({
-                success: true,
+
+                success:
+                    true,
 
                 referralCode:
                     referralCode,
@@ -947,13 +2155,16 @@ app.get(
             });
 
         } catch (error) {
+
             console.error(
                 'REFERRAL DETAILS ERROR:',
                 error
             );
 
             res.status(500).json({
-                success: false,
+                success:
+                    false,
+
                 message:
                     'Server error: ' +
                     error.message
@@ -963,14 +2174,16 @@ app.get(
 );
 
 // ============================================================
-// BALANCE CHECK
+// BALANCE
 // ============================================================
 
 app.get(
     '/api/user/balance/:phone',
     verifyFirebaseToken,
     async (req, res) => {
+
         try {
+
             const phone =
                 normalizePhone(
                     req.params.phone
@@ -982,57 +2195,76 @@ app.get(
                     phone
                 )
             ) {
+
                 return res.status(403).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Phone does not match authenticated Firebase user.'
                 });
             }
 
-            const db = getDB();
-
             const userDoc =
-                await db
-                    .collection('users')
-                    .doc(phone)
+                await getDB()
+                    .collection(
+                        'users'
+                    )
+                    .doc(
+                        phone
+                    )
                     .get();
 
-            if (!userDoc.exists) {
+            if (
+                !userDoc.exists
+            ) {
+
                 return res.json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'User not found'
                 });
             }
 
             const data =
-                userDoc.data();
+                userDoc.data() ||
+                {};
 
             res.json({
-                success: true,
+
+                success:
+                    true,
 
                 credits:
                     Number(
-                        data.credits || 0
+                        data.credits ||
+                        0
                     ),
 
                 totalRides:
                     Number(
-                        data.totalRides || 0
+                        data.totalRides ||
+                        0
                     ),
 
                 referralCode:
-                    data.referralCode || ''
+                    data.referralCode ||
+                    ''
             });
 
         } catch (error) {
+
             console.error(
                 'BALANCE ERROR:',
                 error
             );
 
             res.status(500).json({
-                success: false,
+                success:
+                    false,
+
                 message:
                     'Server error: ' +
                     error.message
@@ -1048,8 +2280,11 @@ app.get(
 app.get(
     '/api/recharge/config',
     (req, res) => {
+
         res.json({
-            success: true,
+
+            success:
+                true,
 
             minRechargeRupees:
                 MIN_RECHARGE_RUPEES,
@@ -1061,12 +2296,23 @@ app.get(
                 CREDIT_PER_RUPEE,
 
             examples: {
-                '10': 10,
-                '20': 20,
-                '50': 50,
-                '100': 100,
-                '500': 500,
-                '1000': 1000
+                '10':
+                    10,
+
+                '20':
+                    20,
+
+                '50':
+                    50,
+
+                '100':
+                    100,
+
+                '500':
+                    500,
+
+                '1000':
+                    1000
             },
 
             message:
@@ -1083,21 +2329,24 @@ app.post(
     '/api/recharge/create-order',
     verifyFirebaseToken,
     async (req, res) => {
+
         try {
+
             const phone =
-                getAuthenticatedPhone(req);
+                getAuthenticatedPhone(
+                    req
+                );
 
             const amountRupees =
                 Number(
                     req.body.amountRupees
                 );
 
-            if (
-                !phone ||
-                phone.length < 10
-            ) {
+            if (!phone) {
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Valid authenticated phone number required'
                 });
@@ -1108,33 +2357,48 @@ app.post(
                     amountRupees
                 )
             ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         `Minimum recharge is ₹${MIN_RECHARGE_RUPEES} and amount must be a whole number.`
                 });
             }
 
-            const db = getDB();
+            const db =
+                getDB();
 
             const userRef =
                 db
-                    .collection('users')
-                    .doc(phone);
+                    .collection(
+                        'users'
+                    )
+                    .doc(
+                        phone
+                    );
 
             const userDoc =
                 await userRef.get();
 
-            if (!userDoc.exists) {
+            if (
+                !userDoc.exists
+            ) {
+
                 return res.status(404).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'User not found'
                 });
             }
 
+            // ₹1 = 1 credit
             const amountPaise =
-                amountRupees * 100;
+                amountRupees *
+                100;
 
             const creditsToAdd =
                 amountRupees *
@@ -1144,8 +2408,10 @@ app.post(
                 getRazorpay();
 
             const order =
-                await razorpay.orders.create(
-                    {
+                await razorpay
+                    .orders
+                    .create({
+
                         amount:
                             amountPaise,
 
@@ -1156,6 +2422,7 @@ app.post(
                             generateReceipt(),
 
                         notes: {
+
                             phone:
                                 phone,
 
@@ -1169,15 +2436,17 @@ app.post(
                                     creditsToAdd
                                 )
                         }
-                    }
-                );
+                    });
 
             await db
                 .collection(
                     'rechargeOrders'
                 )
-                .doc(order.id)
+                .doc(
+                    order.id
+                )
                 .set({
+
                     razorpayOrderId:
                         order.id,
 
@@ -1197,20 +2466,20 @@ app.post(
                         'created',
 
                     createdAt:
-                        admin
-                            .firestore
+                        admin.firestore
                             .FieldValue
                             .serverTimestamp(),
 
                     updatedAt:
-                        admin
-                            .firestore
+                        admin.firestore
                             .FieldValue
                             .serverTimestamp()
                 });
 
             res.json({
-                success: true,
+
+                success:
+                    true,
 
                 keyId:
                     process.env
@@ -1236,13 +2505,16 @@ app.post(
             });
 
         } catch (error) {
+
             console.error(
                 'CREATE RAZORPAY ORDER ERROR:',
                 error
             );
 
             res.status(500).json({
-                success: false,
+                success:
+                    false,
+
                 message:
                     'Unable to create payment order: ' +
                     error.message
@@ -1259,29 +2531,33 @@ app.post(
     '/api/recharge/verify',
     verifyFirebaseToken,
     async (req, res) => {
+
         try {
+
             const phone =
-                getAuthenticatedPhone(req);
+                getAuthenticatedPhone(
+                    req
+                );
 
             const razorpayOrderId =
                 String(
                     req.body
                         .razorpayOrderId ||
-                        ''
+                    ''
                 ).trim();
 
             const razorpayPaymentId =
                 String(
                     req.body
                         .razorpayPaymentId ||
-                        ''
+                    ''
                 ).trim();
 
             const razorpaySignature =
                 String(
                     req.body
                         .razorpaySignature ||
-                        ''
+                    ''
                 ).trim();
 
             if (
@@ -1289,14 +2565,18 @@ app.post(
                 !razorpayPaymentId ||
                 !razorpaySignature
             ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Incomplete Razorpay payment details'
                 });
             }
 
-            const db = getDB();
+            const db =
+                getDB();
 
             const orderRef =
                 db
@@ -1310,46 +2590,74 @@ app.post(
             const orderDoc =
                 await orderRef.get();
 
-            if (!orderDoc.exists) {
+            if (
+                !orderDoc.exists
+            ) {
+
                 return res.status(404).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Payment order not found'
                 });
             }
 
             const storedOrder =
-                orderDoc.data();
+                orderDoc.data() ||
+                {};
+
+            // --------------------------------
+            // PHONE CHECK
+            // --------------------------------
 
             if (
                 normalizePhone(
                     storedOrder.phone
-                ) !== phone
+                ) !==
+                phone
             ) {
+
                 return res.status(403).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Payment phone mismatch'
                 });
             }
 
+            // --------------------------------
+            // ALREADY PAID
+            // --------------------------------
+
             if (
                 storedOrder.status ===
                 'paid'
             ) {
+
                 const userDoc =
                     await db
-                        .collection('users')
-                        .doc(phone)
+                        .collection(
+                            'users'
+                        )
+                        .doc(
+                            phone
+                        )
                         .get();
 
                 const userData =
                     userDoc.exists
-                        ? userDoc.data()
+                        ? (
+                            userDoc.data() ||
+                            {}
+                        )
                         : {};
 
                 return res.json({
-                    success: true,
+
+                    success:
+                        true,
 
                     alreadyProcessed:
                         true,
@@ -1360,65 +2668,105 @@ app.post(
                     credits:
                         Number(
                             userData.credits ||
-                                0
+                            0
                         )
                 });
             }
+
+            // --------------------------------
+            // SIGNATURE
+            // --------------------------------
 
             const signatureValid =
                 verifyRazorpaySignature(
                     storedOrder
                         .razorpayOrderId,
+
                     razorpayPaymentId,
+
                     razorpaySignature
                 );
 
-            if (!signatureValid) {
+            if (
+                !signatureValid
+            ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Invalid Razorpay signature'
                 });
             }
 
+            // --------------------------------
+            // FETCH PAYMENT
+            // --------------------------------
+
             const razorpay =
                 getRazorpay();
 
             const payment =
-                await razorpay.payments.fetch(
-                    razorpayPaymentId
-                );
+                await razorpay
+                    .payments
+                    .fetch(
+                        razorpayPaymentId
+                    );
+
+            // --------------------------------
+            // ORDER CHECK
+            // --------------------------------
 
             if (
                 payment.order_id !==
-                storedOrder.razorpayOrderId
+                storedOrder
+                    .razorpayOrderId
             ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Payment order mismatch'
                 });
             }
 
+            // --------------------------------
+            // AMOUNT CHECK
+            // --------------------------------
+
             if (
-                Number(payment.amount) !==
+                Number(
+                    payment.amount
+                ) !==
                 Number(
                     storedOrder.amountPaise
                 )
             ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         'Payment amount mismatch'
                 });
             }
 
+            // --------------------------------
+            // CAPTURE CHECK
+            // --------------------------------
+
             if (
                 payment.status !==
                 'captured'
             ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
 
                     paymentStatus:
                         payment.status,
@@ -1430,15 +2778,23 @@ app.post(
 
             const userRef =
                 db
-                    .collection('users')
-                    .doc(phone);
+                    .collection(
+                        'users'
+                    )
+                    .doc(
+                        phone
+                    );
 
-            let finalCredits = 0;
+            let finalCredits =
+                0;
+
+            // --------------------------------
+            // ATOMIC CREDIT ADD
+            // --------------------------------
 
             await db.runTransaction(
-                async (
-                    transaction
-                ) => {
+                async transaction => {
+
                     const freshOrderDoc =
                         await transaction.get(
                             orderRef
@@ -1447,56 +2803,74 @@ app.post(
                     if (
                         !freshOrderDoc.exists
                     ) {
+
                         throw new Error(
                             'Payment order not found'
                         );
                     }
 
-                    const freshOrder =
-                        freshOrderDoc.data();
-
-                    const userDoc =
+                    const freshUserDoc =
                         await transaction.get(
                             userRef
                         );
 
                     if (
-                        !userDoc.exists
+                        !freshUserDoc.exists
                     ) {
+
                         throw new Error(
                             'User not found'
                         );
                     }
 
+                    const freshOrder =
+                        freshOrderDoc.data() ||
+                        {};
+
                     const userData =
-                        userDoc.data();
+                        freshUserDoc.data() ||
+                        {};
 
                     const currentCredits =
                         Number(
-                            userData.credits ||
-                                0
+                            userData
+                                .credits ||
+                            0
                         );
+
+                    // --------------------------------
+                    // DOUBLE PROCESS PROTECTION
+                    // --------------------------------
 
                     if (
                         freshOrder.status ===
                         'paid'
                     ) {
+
                         finalCredits =
                             currentCredits;
 
                         return;
                     }
 
+                    // --------------------------------
+                    // CREDITS
+                    // --------------------------------
+
                     const creditsToAdd =
                         Number(
                             freshOrder
                                 .creditsToAdd ||
-                                0
+                            0
                         );
 
                     const updatedCredits =
                         currentCredits +
                         creditsToAdd;
+
+                    // --------------------------------
+                    // UPDATE USER
+                    // --------------------------------
 
                     transaction.update(
                         userRef,
@@ -1505,12 +2879,15 @@ app.post(
                                 updatedCredits,
 
                             updatedAt:
-                                admin
-                                    .firestore
+                                admin.firestore
                                     .FieldValue
                                     .serverTimestamp()
                         }
                     );
+
+                    // --------------------------------
+                    // MARK ORDER PAID
+                    // --------------------------------
 
                     transaction.update(
                         orderRef,
@@ -1525,18 +2902,20 @@ app.post(
                                 payment.status,
 
                             paidAt:
-                                admin
-                                    .firestore
+                                admin.firestore
                                     .FieldValue
                                     .serverTimestamp(),
 
                             updatedAt:
-                                admin
-                                    .firestore
+                                admin.firestore
                                     .FieldValue
                                     .serverTimestamp()
                         }
                     );
+
+                    // --------------------------------
+                    // PAYMENT RECORD
+                    // --------------------------------
 
                     const paymentRef =
                         db
@@ -1551,7 +2930,7 @@ app.post(
                         paymentRef,
                         {
                             razorpayOrderId:
-                                storedOrder
+                                freshOrder
                                     .razorpayOrderId,
 
                             razorpayPaymentId:
@@ -1562,13 +2941,13 @@ app.post(
 
                             amountRupees:
                                 Number(
-                                    storedOrder
+                                    freshOrder
                                         .amountRupees
                                 ),
 
                             amountPaise:
                                 Number(
-                                    storedOrder
+                                    freshOrder
                                         .amountPaise
                                 ),
 
@@ -1579,13 +2958,13 @@ app.post(
                                 'captured',
 
                             createdAt:
-                                admin
-                                    .firestore
+                                admin.firestore
                                     .FieldValue
                                     .serverTimestamp()
                         },
                         {
-                            merge: true
+                            merge:
+                                true
                         }
                     );
 
@@ -1595,7 +2974,9 @@ app.post(
             );
 
             res.json({
-                success: true,
+
+                success:
+                    true,
 
                 message:
                     `${storedOrder.creditsToAdd} credits added successfully`,
@@ -1611,13 +2992,16 @@ app.post(
             });
 
         } catch (error) {
+
             console.error(
                 'RAZORPAY VERIFY ERROR:',
                 error
             );
 
             res.status(500).json({
-                success: false,
+                success:
+                    false,
+
                 message:
                     'Payment verification failed: ' +
                     error.message
@@ -1627,39 +3011,40 @@ app.post(
 );
 
 // ============================================================
-// DEDUCT CREDIT - SUCCESSFUL RIDE ONLY
-// ============================================================
-// 1 successful ride = 1 credit
-//
-// IMPORTANT:
-// Android should call this endpoint ONLY after
-// the ride has actually been accepted successfully.
-//
-// MATCHED / DETECTED / REJECTED:
-// NO deduction.
+// DEDUCT CREDIT
+// 1 SUCCESSFUL RIDE = 1 CREDIT
 // ============================================================
 
 app.post(
     '/api/ride/deduct-credit',
     verifyFirebaseToken,
     async (req, res) => {
-        try {
-            const phone =
-                getAuthenticatedPhone(req);
 
-            const db = getDB();
+        try {
+
+            const phone =
+                getAuthenticatedPhone(
+                    req
+                );
+
+            const db =
+                getDB();
 
             const userRef =
                 db
-                    .collection('users')
-                    .doc(phone);
+                    .collection(
+                        'users'
+                    )
+                    .doc(
+                        phone
+                    );
 
-            let result;
+            let result =
+                null;
 
             await db.runTransaction(
-                async (
-                    transaction
-                ) => {
+                async transaction => {
+
                     const userDoc =
                         await transaction.get(
                             userRef
@@ -1668,30 +3053,37 @@ app.post(
                     if (
                         !userDoc.exists
                     ) {
+
                         throw new Error(
                             'User not found'
                         );
                     }
 
                     const data =
-                        userDoc.data();
+                        userDoc.data() ||
+                        {};
 
                     const currentCredits =
                         Number(
                             data.credits ||
-                                0
+                            0
                         );
 
                     const totalRides =
                         Number(
                             data.totalRides ||
-                                0
+                            0
                         );
+
+                    // --------------------------------
+                    // NO CREDIT
+                    // --------------------------------
 
                     if (
                         currentCredits <=
                         0
                     ) {
+
                         throw new Error(
                             'No credits left. Please recharge.'
                         );
@@ -1705,6 +3097,10 @@ app.post(
                         totalRides +
                         1;
 
+                    // --------------------------------
+                    // UPDATE
+                    // --------------------------------
+
                     transaction.update(
                         userRef,
                         {
@@ -1715,8 +3111,7 @@ app.post(
                                 updatedTotalRides,
 
                             updatedAt:
-                                admin
-                                    .firestore
+                                admin.firestore
                                     .FieldValue
                                     .serverTimestamp()
                         }
@@ -1733,19 +3128,24 @@ app.post(
             );
 
             res.json({
-                success: true,
+
+                success:
+                    true,
 
                 message:
                     '1 credit deducted for successful ride',
 
                 remainingCredits:
-                    result.remainingCredits,
+                    result
+                        .remainingCredits,
 
                 totalRides:
-                    result.totalRides
+                    result
+                        .totalRides
             });
 
         } catch (error) {
+
             console.error(
                 'DEDUCT CREDIT ERROR:',
                 error
@@ -1755,8 +3155,11 @@ app.post(
                 error.message ===
                 'No credits left. Please recharge.'
             ) {
+
                 return res.status(400).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         error.message
                 });
@@ -1766,15 +3169,20 @@ app.post(
                 error.message ===
                 'User not found'
             ) {
+
                 return res.status(404).json({
-                    success: false,
+                    success:
+                        false,
+
                     message:
                         error.message
                 });
             }
 
             res.status(500).json({
-                success: false,
+                success:
+                    false,
+
                 message:
                     'Server error: ' +
                     error.message
@@ -1788,10 +3196,14 @@ app.post(
 // ============================================================
 
 const PORT =
-    process.env.PORT || 5000;
+    process.env.PORT ||
+    5000;
 
-app.listen(PORT, () => {
-    console.log(
-        `Server started on port ${PORT}`
-    );
-});
+app.listen(
+    PORT,
+    () => {
+        console.log(
+            `Server started on port ${PORT}`
+        );
+    }
+);
