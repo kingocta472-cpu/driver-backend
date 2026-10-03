@@ -390,6 +390,10 @@ function verifyRazorpaySignature(
 // ============================================================
 // FIREBASE APP CHECK
 // ============================================================
+// Kept as helper for compatibility, but it is NOT mandatory
+// for login/API authentication in this final version.
+// Firebase ID-token authentication remains mandatory.
+// ============================================================
 
 function getAppCheckService() {
 
@@ -595,18 +599,11 @@ async function verifyFirebaseToken(
 ) {
     try {
 
-        // -------------------------
-        // APP CHECK
-        // -------------------------
-
-        req.appCheck =
-            await verifyAppCheckHeader(
-                req
-            );
-
-        // -------------------------
-        // FIREBASE ID TOKEN
-        // -------------------------
+        // --------------------------------------------------------
+        // FINAL VERSION:
+        // App Check is NOT required here.
+        // Firebase ID token is still mandatory.
+        // --------------------------------------------------------
 
         const decoded =
             await decodeFirebaseToken(
@@ -625,11 +622,11 @@ async function verifyFirebaseToken(
             decoded.firebase &&
             decoded.firebase
                 .sign_in_provider
-                ? String(
-                    decoded.firebase
-                        .sign_in_provider
-                )
-                : '';
+            ? String(
+                decoded.firebase
+                    .sign_in_provider
+            )
+            : '';
 
         // Anonymous account is only
         // allowed for bootstrap login.
@@ -1121,7 +1118,6 @@ app.get(
 
 app.post(
     '/api/auth/login',
-    verifyFirebaseAppCheck,
     verifyFirebaseIdentity,
     async (req, res) => {
 
@@ -1502,34 +1498,51 @@ app.post(
                             referralDoc.data() ||
                             {};
 
-                        referrerPhone =
+                        const possibleReferrerPhone =
                             normalizePhone(
-                                referralData.userId
+                                referralData
+                                    .userId ||
+                                ''
                             );
 
-                        // SELF REFERRAL BLOCK
                         if (
-                            referrerPhone &&
-                            referrerPhone !==
+                            possibleReferrerPhone &&
+                            possibleReferrerPhone !==
                                 phone
                         ) {
 
-                            referralApplied =
-                                true;
-
-                            referralLedgerRef =
+                            const referrerUserRef =
                                 db
                                     .collection(
-                                        'referralRewards'
+                                        'users'
                                     )
                                     .doc(
-                                        `${referrerPhone}_${phone}`
+                                        possibleReferrerPhone
                                     );
 
-                        } else {
+                            const referrerDoc =
+                                await referrerUserRef
+                                    .get();
 
-                            referrerPhone =
-                                '';
+                            if (
+                                referrerDoc.exists
+                            ) {
+
+                                referralApplied =
+                                    true;
+
+                                referrerPhone =
+                                    possibleReferrerPhone;
+
+                                referralLedgerRef =
+                                    db
+                                        .collection(
+                                            'referralRewards'
+                                        )
+                                        .doc(
+                                            `${referrerPhone}_${phone}`
+                                        );
+                            }
                         }
                     }
                 }
@@ -1567,7 +1580,6 @@ app.post(
                                     userRef
                                 );
 
-                            // Race protection
                             if (
                                 freshUser.exists
                             ) {
@@ -1604,10 +1616,6 @@ app.post(
                                 trialGranted
                                     ? FREE_START_CREDITS
                                     : 0;
-
-                            // --------------------------------
-                            // CREATE USER
-                            // --------------------------------
 
                             transaction.set(
                                 userRef,
@@ -1669,10 +1677,6 @@ app.post(
                                 }
                             );
 
-                            // --------------------------------
-                            // SAVE TRIAL CLAIM
-                            // --------------------------------
-
                             if (
                                 trialGranted
                             ) {
@@ -1698,10 +1702,6 @@ app.post(
                                     }
                                 );
                             }
-
-                            // --------------------------------
-                            // REFERRAL LEDGER
-                            // --------------------------------
 
                             if (
                                 referralApplied &&
@@ -1745,10 +1745,6 @@ app.post(
                         }
                     );
 
-                // ====================================================
-                // RACE CONDITION
-                // ====================================================
-
                 if (
                     !transactionResult.created
                 ) {
@@ -1772,7 +1768,6 @@ app.post(
                         racedUser.data() ||
                         {};
 
-                    // Existing race-created PIN
                     if (
                         userData.pinHash &&
                         userData.pinSalt
@@ -1818,91 +1813,77 @@ app.post(
                         }
                     }
 
-                    const updates = {
-                        firebaseUid:
-                            driverFirebaseUid,
-
-                        authMethod:
-                            'pin',
-
-                        updatedAt:
-                            admin.firestore
-                                .FieldValue
-                                .serverTimestamp()
-                    };
-
-                    await userRef.update(
-                        updates
-                    );
-
-                    userData = {
-                        ...userData,
-                        ...updates
-                    };
+                    trialCreditsAdded =
+                        0;
 
                     isNewUser =
                         false;
 
                 } else {
 
-                    // --------------------------------
-                    // TRIAL CREDITS
-                    // --------------------------------
-
-                    if (
+                    trialCreditsAdded =
                         transactionResult
                             .trialGranted
-                    ) {
+                            ? FREE_START_CREDITS
+                            : 0;
 
-                        trialCreditsAdded =
-                            FREE_START_CREDITS;
-                    }
+                    const createdUserDoc =
+                        await userRef.get();
 
-                    // ================================================
-                    // REFERRER +5 CREDIT
-                    // ================================================
+                    userData =
+                        createdUserDoc.data() ||
+                        {};
+
+                    // --------------------------------
+                    // REFERRAL REWARD
+                    // --------------------------------
 
                     if (
                         referralApplied &&
                         referralLedgerRef
                     ) {
 
-                        const referrerRef =
-                            db
-                                .collection(
-                                    'users'
-                                )
-                                .doc(
-                                    referrerPhone
-                                );
-
                         await db.runTransaction(
                             async transaction => {
+
+                                const freshLedger =
+                                    await transaction.get(
+                                        referralLedgerRef
+                                    );
+
+                                if (
+                                    !freshLedger.exists
+                                ) {
+                                    return;
+                                }
+
+                                const ledgerData =
+                                    freshLedger.data() ||
+                                    {};
+
+                                if (
+                                    ledgerData.status !==
+                                    'pending'
+                                ) {
+                                    return;
+                                }
+
+                                const referrerRef =
+                                    db
+                                        .collection(
+                                            'users'
+                                        )
+                                        .doc(
+                                            referrerPhone
+                                        );
 
                                 const referrerDoc =
                                     await transaction.get(
                                         referrerRef
                                     );
 
-                                const ledgerDoc =
-                                    await transaction.get(
-                                        referralLedgerRef
-                                    );
-
                                 if (
-                                    !referrerDoc.exists ||
-                                    !ledgerDoc.exists
-                                ) {
-                                    return;
-                                }
-
-                                const ledgerData =
-                                    ledgerDoc.data() ||
-                                    {};
-
-                                if (
-                                    ledgerData.status ===
-                                    'rewarded'
+                                    !referrerDoc.exists
                                 ) {
                                     return;
                                 }
@@ -2065,1145 +2046,5 @@ app.post(
                     error.message
             });
         }
-    }
-);
-
-// ============================================================
-// GET MY REFERRAL DETAILS
-// ============================================================
-
-app.get(
-    '/api/referral/me',
-    verifyFirebaseToken,
-    async (req, res) => {
-
-        try {
-
-            const phone =
-                getAuthenticatedPhone(
-                    req
-                );
-
-            const db =
-                getDB();
-
-            const userDoc =
-                await db
-                    .collection(
-                        'users'
-                    )
-                    .doc(
-                        phone
-                    )
-                    .get();
-
-            if (
-                !userDoc.exists
-            ) {
-
-                return res.status(404).json({
-                    success:
-                        false,
-
-                    message:
-                        'User not found'
-                });
-            }
-
-            const data =
-                userDoc.data() ||
-                {};
-
-            const referralCode =
-                data.referralCode ||
-                '';
-
-            const rewardsSnapshot =
-                await db
-                    .collection(
-                        'referralRewards'
-                    )
-                    .where(
-                        'referrerPhone',
-                        '==',
-                        phone
-                    )
-                    .where(
-                        'status',
-                        '==',
-                        'rewarded'
-                    )
-                    .get();
-
-            res.json({
-
-                success:
-                    true,
-
-                referralCode:
-                    referralCode,
-
-                successfulReferrals:
-                    rewardsSnapshot.size,
-
-                creditsEarned:
-                    rewardsSnapshot.size *
-                    REFERRAL_BONUS_CREDITS,
-
-                bonusPerReferral:
-                    REFERRAL_BONUS_CREDITS
-            });
-
-        } catch (error) {
-
-            console.error(
-                'REFERRAL DETAILS ERROR:',
-                error
-            );
-
-            res.status(500).json({
-                success:
-                    false,
-
-                message:
-                    'Server error: ' +
-                    error.message
-            });
-        }
-    }
-);
-
-// ============================================================
-// BALANCE
-// ============================================================
-
-app.get(
-    '/api/user/balance/:phone',
-    verifyFirebaseToken,
-    async (req, res) => {
-
-        try {
-
-            const phone =
-                normalizePhone(
-                    req.params.phone
-                );
-
-            if (
-                !phoneMatchesAuthenticatedUser(
-                    req,
-                    phone
-                )
-            ) {
-
-                return res.status(403).json({
-                    success:
-                        false,
-
-                    message:
-                        'Phone does not match authenticated Firebase user.'
-                });
-            }
-
-            const userDoc =
-                await getDB()
-                    .collection(
-                        'users'
-                    )
-                    .doc(
-                        phone
-                    )
-                    .get();
-
-            if (
-                !userDoc.exists
-            ) {
-
-                return res.json({
-                    success:
-                        false,
-
-                    message:
-                        'User not found'
-                });
-            }
-
-            const data =
-                userDoc.data() ||
-                {};
-
-            res.json({
-
-                success:
-                    true,
-
-                credits:
-                    Number(
-                        data.credits ||
-                        0
-                    ),
-
-                totalRides:
-                    Number(
-                        data.totalRides ||
-                        0
-                    ),
-
-                referralCode:
-                    data.referralCode ||
-                    ''
-            });
-
-        } catch (error) {
-
-            console.error(
-                'BALANCE ERROR:',
-                error
-            );
-
-            res.status(500).json({
-                success:
-                    false,
-
-                message:
-                    'Server error: ' +
-                    error.message
-            });
-        }
-    }
-);
-
-// ============================================================
-// RECHARGE CONFIG
-// ============================================================
-
-app.get(
-    '/api/recharge/config',
-    (req, res) => {
-
-        res.json({
-
-            success:
-                true,
-
-            minRechargeRupees:
-                MIN_RECHARGE_RUPEES,
-
-            rupeesPerCredit:
-                1,
-
-            creditsPerRupee:
-                CREDIT_PER_RUPEE,
-
-            examples: {
-                '10':
-                    10,
-
-                '20':
-                    20,
-
-                '50':
-                    50,
-
-                '100':
-                    100,
-
-                '500':
-                    500,
-
-                '1000':
-                    1000
-            },
-
-            message:
-                '₹1 = 1 credit. Minimum recharge is ₹10.'
-        });
-    }
-);
-
-// ============================================================
-// CREATE RAZORPAY ORDER
-// ============================================================
-
-app.post(
-    '/api/recharge/create-order',
-    verifyFirebaseToken,
-    async (req, res) => {
-
-        try {
-
-            const phone =
-                getAuthenticatedPhone(
-                    req
-                );
-
-            const amountRupees =
-                Number(
-                    req.body.amountRupees
-                );
-
-            if (!phone) {
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        'Valid authenticated phone number required'
-                });
-            }
-
-            if (
-                !isValidRechargeAmount(
-                    amountRupees
-                )
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        `Minimum recharge is ₹${MIN_RECHARGE_RUPEES} and amount must be a whole number.`
-                });
-            }
-
-            const db =
-                getDB();
-
-            const userRef =
-                db
-                    .collection(
-                        'users'
-                    )
-                    .doc(
-                        phone
-                    );
-
-            const userDoc =
-                await userRef.get();
-
-            if (
-                !userDoc.exists
-            ) {
-
-                return res.status(404).json({
-                    success:
-                        false,
-
-                    message:
-                        'User not found'
-                });
-            }
-
-            // ₹1 = 1 credit
-            const amountPaise =
-                amountRupees *
-                100;
-
-            const creditsToAdd =
-                amountRupees *
-                CREDIT_PER_RUPEE;
-
-            const razorpay =
-                getRazorpay();
-
-            const order =
-                await razorpay
-                    .orders
-                    .create({
-
-                        amount:
-                            amountPaise,
-
-                        currency:
-                            'INR',
-
-                        receipt:
-                            generateReceipt(),
-
-                        notes: {
-
-                            phone:
-                                phone,
-
-                            amountRupees:
-                                String(
-                                    amountRupees
-                                ),
-
-                            credits:
-                                String(
-                                    creditsToAdd
-                                )
-                        }
-                    });
-
-            await db
-                .collection(
-                    'rechargeOrders'
-                )
-                .doc(
-                    order.id
-                )
-                .set({
-
-                    razorpayOrderId:
-                        order.id,
-
-                    phone:
-                        phone,
-
-                    amountRupees:
-                        amountRupees,
-
-                    amountPaise:
-                        amountPaise,
-
-                    creditsToAdd:
-                        creditsToAdd,
-
-                    status:
-                        'created',
-
-                    createdAt:
-                        admin.firestore
-                            .FieldValue
-                            .serverTimestamp(),
-
-                    updatedAt:
-                        admin.firestore
-                            .FieldValue
-                            .serverTimestamp()
-                });
-
-            res.json({
-
-                success:
-                    true,
-
-                keyId:
-                    process.env
-                        .RAZORPAY_KEY_ID,
-
-                orderId:
-                    order.id,
-
-                amount:
-                    amountPaise,
-
-                currency:
-                    'INR',
-
-                amountRupees:
-                    amountRupees,
-
-                creditsToAdd:
-                    creditsToAdd,
-
-                message:
-                    'Razorpay order created successfully'
-            });
-
-        } catch (error) {
-
-            console.error(
-                'CREATE RAZORPAY ORDER ERROR:',
-                error
-            );
-
-            res.status(500).json({
-                success:
-                    false,
-
-                message:
-                    'Unable to create payment order: ' +
-                    error.message
-            });
-        }
-    }
-);
-
-// ============================================================
-// VERIFY RAZORPAY PAYMENT
-// ============================================================
-
-app.post(
-    '/api/recharge/verify',
-    verifyFirebaseToken,
-    async (req, res) => {
-
-        try {
-
-            const phone =
-                getAuthenticatedPhone(
-                    req
-                );
-
-            const razorpayOrderId =
-                String(
-                    req.body
-                        .razorpayOrderId ||
-                    ''
-                ).trim();
-
-            const razorpayPaymentId =
-                String(
-                    req.body
-                        .razorpayPaymentId ||
-                    ''
-                ).trim();
-
-            const razorpaySignature =
-                String(
-                    req.body
-                        .razorpaySignature ||
-                    ''
-                ).trim();
-
-            if (
-                !razorpayOrderId ||
-                !razorpayPaymentId ||
-                !razorpaySignature
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        'Incomplete Razorpay payment details'
-                });
-            }
-
-            const db =
-                getDB();
-
-            const orderRef =
-                db
-                    .collection(
-                        'rechargeOrders'
-                    )
-                    .doc(
-                        razorpayOrderId
-                    );
-
-            const orderDoc =
-                await orderRef.get();
-
-            if (
-                !orderDoc.exists
-            ) {
-
-                return res.status(404).json({
-                    success:
-                        false,
-
-                    message:
-                        'Payment order not found'
-                });
-            }
-
-            const storedOrder =
-                orderDoc.data() ||
-                {};
-
-            // --------------------------------
-            // PHONE CHECK
-            // --------------------------------
-
-            if (
-                normalizePhone(
-                    storedOrder.phone
-                ) !==
-                phone
-            ) {
-
-                return res.status(403).json({
-                    success:
-                        false,
-
-                    message:
-                        'Payment phone mismatch'
-                });
-            }
-
-            // --------------------------------
-            // ALREADY PAID
-            // --------------------------------
-
-            if (
-                storedOrder.status ===
-                'paid'
-            ) {
-
-                const userDoc =
-                    await db
-                        .collection(
-                            'users'
-                        )
-                        .doc(
-                            phone
-                        )
-                        .get();
-
-                const userData =
-                    userDoc.exists
-                        ? (
-                            userDoc.data() ||
-                            {}
-                        )
-                        : {};
-
-                return res.json({
-
-                    success:
-                        true,
-
-                    alreadyProcessed:
-                        true,
-
-                    message:
-                        'Payment already processed',
-
-                    credits:
-                        Number(
-                            userData.credits ||
-                            0
-                        )
-                });
-            }
-
-            // --------------------------------
-            // SIGNATURE
-            // --------------------------------
-
-            const signatureValid =
-                verifyRazorpaySignature(
-                    storedOrder
-                        .razorpayOrderId,
-
-                    razorpayPaymentId,
-
-                    razorpaySignature
-                );
-
-            if (
-                !signatureValid
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        'Invalid Razorpay signature'
-                });
-            }
-
-            // --------------------------------
-            // FETCH PAYMENT
-            // --------------------------------
-
-            const razorpay =
-                getRazorpay();
-
-            const payment =
-                await razorpay
-                    .payments
-                    .fetch(
-                        razorpayPaymentId
-                    );
-
-            // --------------------------------
-            // ORDER CHECK
-            // --------------------------------
-
-            if (
-                payment.order_id !==
-                storedOrder
-                    .razorpayOrderId
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        'Payment order mismatch'
-                });
-            }
-
-            // --------------------------------
-            // AMOUNT CHECK
-            // --------------------------------
-
-            if (
-                Number(
-                    payment.amount
-                ) !==
-                Number(
-                    storedOrder.amountPaise
-                )
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        'Payment amount mismatch'
-                });
-            }
-
-            // --------------------------------
-            // CAPTURE CHECK
-            // --------------------------------
-
-            if (
-                payment.status !==
-                'captured'
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    paymentStatus:
-                        payment.status,
-
-                    message:
-                        'Payment is not captured yet'
-                });
-            }
-
-            const userRef =
-                db
-                    .collection(
-                        'users'
-                    )
-                    .doc(
-                        phone
-                    );
-
-            let finalCredits =
-                0;
-
-            // --------------------------------
-            // ATOMIC CREDIT ADD
-            // --------------------------------
-
-            await db.runTransaction(
-                async transaction => {
-
-                    const freshOrderDoc =
-                        await transaction.get(
-                            orderRef
-                        );
-
-                    if (
-                        !freshOrderDoc.exists
-                    ) {
-
-                        throw new Error(
-                            'Payment order not found'
-                        );
-                    }
-
-                    const freshUserDoc =
-                        await transaction.get(
-                            userRef
-                        );
-
-                    if (
-                        !freshUserDoc.exists
-                    ) {
-
-                        throw new Error(
-                            'User not found'
-                        );
-                    }
-
-                    const freshOrder =
-                        freshOrderDoc.data() ||
-                        {};
-
-                    const userData =
-                        freshUserDoc.data() ||
-                        {};
-
-                    const currentCredits =
-                        Number(
-                            userData
-                                .credits ||
-                            0
-                        );
-
-                    // --------------------------------
-                    // DOUBLE PROCESS PROTECTION
-                    // --------------------------------
-
-                    if (
-                        freshOrder.status ===
-                        'paid'
-                    ) {
-
-                        finalCredits =
-                            currentCredits;
-
-                        return;
-                    }
-
-                    // --------------------------------
-                    // CREDITS
-                    // --------------------------------
-
-                    const creditsToAdd =
-                        Number(
-                            freshOrder
-                                .creditsToAdd ||
-                            0
-                        );
-
-                    const updatedCredits =
-                        currentCredits +
-                        creditsToAdd;
-
-                    // --------------------------------
-                    // UPDATE USER
-                    // --------------------------------
-
-                    transaction.update(
-                        userRef,
-                        {
-                            credits:
-                                updatedCredits,
-
-                            updatedAt:
-                                admin.firestore
-                                    .FieldValue
-                                    .serverTimestamp()
-                        }
-                    );
-
-                    // --------------------------------
-                    // MARK ORDER PAID
-                    // --------------------------------
-
-                    transaction.update(
-                        orderRef,
-                        {
-                            status:
-                                'paid',
-
-                            razorpayPaymentId:
-                                razorpayPaymentId,
-
-                            paymentStatus:
-                                payment.status,
-
-                            paidAt:
-                                admin.firestore
-                                    .FieldValue
-                                    .serverTimestamp(),
-
-                            updatedAt:
-                                admin.firestore
-                                    .FieldValue
-                                    .serverTimestamp()
-                        }
-                    );
-
-                    // --------------------------------
-                    // PAYMENT RECORD
-                    // --------------------------------
-
-                    const paymentRef =
-                        db
-                            .collection(
-                                'payments'
-                            )
-                            .doc(
-                                razorpayPaymentId
-                            );
-
-                    transaction.set(
-                        paymentRef,
-                        {
-                            razorpayOrderId:
-                                freshOrder
-                                    .razorpayOrderId,
-
-                            razorpayPaymentId:
-                                razorpayPaymentId,
-
-                            phone:
-                                phone,
-
-                            amountRupees:
-                                Number(
-                                    freshOrder
-                                        .amountRupees
-                                ),
-
-                            amountPaise:
-                                Number(
-                                    freshOrder
-                                        .amountPaise
-                                ),
-
-                            creditsAdded:
-                                creditsToAdd,
-
-                            status:
-                                'captured',
-
-                            createdAt:
-                                admin.firestore
-                                    .FieldValue
-                                    .serverTimestamp()
-                        },
-                        {
-                            merge:
-                                true
-                        }
-                    );
-
-                    finalCredits =
-                        updatedCredits;
-                }
-            );
-
-            res.json({
-
-                success:
-                    true,
-
-                message:
-                    `${storedOrder.creditsToAdd} credits added successfully`,
-
-                amountRupees:
-                    storedOrder.amountRupees,
-
-                creditsAdded:
-                    storedOrder.creditsToAdd,
-
-                credits:
-                    finalCredits
-            });
-
-        } catch (error) {
-
-            console.error(
-                'RAZORPAY VERIFY ERROR:',
-                error
-            );
-
-            res.status(500).json({
-                success:
-                    false,
-
-                message:
-                    'Payment verification failed: ' +
-                    error.message
-            });
-        }
-    }
-);
-
-// ============================================================
-// DEDUCT CREDIT
-// 1 SUCCESSFUL RIDE = 1 CREDIT
-// ============================================================
-
-app.post(
-    '/api/ride/deduct-credit',
-    verifyFirebaseToken,
-    async (req, res) => {
-
-        try {
-
-            const phone =
-                getAuthenticatedPhone(
-                    req
-                );
-
-            const db =
-                getDB();
-
-            const userRef =
-                db
-                    .collection(
-                        'users'
-                    )
-                    .doc(
-                        phone
-                    );
-
-            let result =
-                null;
-
-            await db.runTransaction(
-                async transaction => {
-
-                    const userDoc =
-                        await transaction.get(
-                            userRef
-                        );
-
-                    if (
-                        !userDoc.exists
-                    ) {
-
-                        throw new Error(
-                            'User not found'
-                        );
-                    }
-
-                    const data =
-                        userDoc.data() ||
-                        {};
-
-                    const currentCredits =
-                        Number(
-                            data.credits ||
-                            0
-                        );
-
-                    const totalRides =
-                        Number(
-                            data.totalRides ||
-                            0
-                        );
-
-                    // --------------------------------
-                    // NO CREDIT
-                    // --------------------------------
-
-                    if (
-                        currentCredits <=
-                        0
-                    ) {
-
-                        throw new Error(
-                            'No credits left. Please recharge.'
-                        );
-                    }
-
-                    const remainingCredits =
-                        currentCredits -
-                        1;
-
-                    const updatedTotalRides =
-                        totalRides +
-                        1;
-
-                    // --------------------------------
-                    // UPDATE
-                    // --------------------------------
-
-                    transaction.update(
-                        userRef,
-                        {
-                            credits:
-                                remainingCredits,
-
-                            totalRides:
-                                updatedTotalRides,
-
-                            updatedAt:
-                                admin.firestore
-                                    .FieldValue
-                                    .serverTimestamp()
-                        }
-                    );
-
-                    result = {
-                        remainingCredits:
-                            remainingCredits,
-
-                        totalRides:
-                            updatedTotalRides
-                    };
-                }
-            );
-
-            res.json({
-
-                success:
-                    true,
-
-                message:
-                    '1 credit deducted for successful ride',
-
-                remainingCredits:
-                    result
-                        .remainingCredits,
-
-                totalRides:
-                    result
-                        .totalRides
-            });
-
-        } catch (error) {
-
-            console.error(
-                'DEDUCT CREDIT ERROR:',
-                error
-            );
-
-            if (
-                error.message ===
-                'No credits left. Please recharge.'
-            ) {
-
-                return res.status(400).json({
-                    success:
-                        false,
-
-                    message:
-                        error.message
-                });
-            }
-
-            if (
-                error.message ===
-                'User not found'
-            ) {
-
-                return res.status(404).json({
-                    success:
-                        false,
-
-                    message:
-                        error.message
-                });
-            }
-
-            res.status(500).json({
-                success:
-                    false,
-
-                message:
-                    'Server error: ' +
-                    error.message
-            });
-        }
-    }
-);
-
-// ============================================================
-// SERVER
-// ============================================================
-
-const PORT =
-    process.env.PORT ||
-    5000;
-
-app.listen(
-    PORT,
-    () => {
-        console.log(
-            `Server started on port ${PORT}`
-        );
     }
 );
