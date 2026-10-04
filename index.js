@@ -1166,6 +1166,17 @@ app.post(
                     req.body.installId
                 );
 
+            // Stable device identity supplied by Android.
+            // Backward-compatible fallback to installId.
+            const deviceId =
+                normalizeInstallId(
+                    req.body.deviceId
+                );
+
+            const trialDeviceId =
+                deviceId ||
+                installId;
+
             // --------------------------------
             // VALIDATE PHONE
             // --------------------------------
@@ -1571,6 +1582,20 @@ app.post(
                             )
                         );
 
+                // Device-level free-trial claim.
+                // A stable Android deviceId prevents multiple phone numbers
+                // on the same device from receiving the free trial again.
+                const deviceTrialClaimRef =
+                    db
+                        .collection(
+                            'deviceTrialClaims'
+                        )
+                        .doc(
+                            hashInstallId(
+                                trialDeviceId
+                            )
+                        );
+
                 const transactionResult =
                     await db.runTransaction(
                         async transaction => {
@@ -1597,6 +1622,11 @@ app.post(
                                     trialClaimRef
                                 );
 
+                            const deviceTrialDoc =
+                                await transaction.get(
+                                    deviceTrialClaimRef
+                                );
+
                             let ledgerDoc =
                                 null;
 
@@ -1610,7 +1640,8 @@ app.post(
                             }
 
                             const trialGranted =
-                                !trialDoc.exists;
+                                !trialDoc.exists &&
+                                !deviceTrialDoc.exists;
 
                             const startingCredits =
                                 trialGranted
@@ -1660,6 +1691,11 @@ app.post(
                                             installId
                                         ),
 
+                                    deviceIdHash:
+                                        hashInstallId(
+                                            trialDeviceId
+                                        ),
+
                                     createdAt:
                                         admin.firestore
                                             .FieldValue
@@ -1687,6 +1723,27 @@ app.post(
                                         installIdHash:
                                             hashInstallId(
                                                 installId
+                                            ),
+
+                                        firstPhone:
+                                            phone,
+
+                                        creditsGranted:
+                                            FREE_START_CREDITS,
+
+                                        createdAt:
+                                            admin.firestore
+                                                .FieldValue
+                                                .serverTimestamp()
+                                    }
+                                );
+
+                                transaction.set(
+                                    deviceTrialClaimRef,
+                                    {
+                                        deviceIdHash:
+                                            hashInstallId(
+                                                trialDeviceId
                                             ),
 
                                         firstPhone:
@@ -2048,3 +2105,9 @@ app.post(
         }
     }
 );
+
+// ============================================================
+// VERCEL SERVERLESS ENTRYPOINT
+// ============================================================
+
+module.exports = app;
