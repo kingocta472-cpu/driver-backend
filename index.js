@@ -39,40 +39,60 @@ if (!cached) {
     };
 }
 
-function getDB() {
-    if (cached.db) {
-        return cached.db;
+function initializeFirebaseAdmin() {
+    if (admin.apps.length > 0) {
+        return admin;
     }
 
-    if (!admin.apps.length) {
-        const privateKey =
-            process.env.FIREBASE_PRIVATE_KEY;
+    const projectId =
+        process.env.FIREBASE_PROJECT_ID;
 
-        if (
-            !process.env.FIREBASE_PROJECT_ID ||
-            !process.env.FIREBASE_CLIENT_EMAIL ||
-            !privateKey
-        ) {
-            throw new Error(
-                'Firebase Admin environment variables are missing.'
-            );
-        }
+    const clientEmail =
+        process.env.FIREBASE_CLIENT_EMAIL;
 
-        admin.initializeApp({
-            credential: admin.credential.cert({
+    const privateKeyRaw =
+        process.env.FIREBASE_PRIVATE_KEY;
+
+    if (
+        !projectId ||
+        !clientEmail ||
+        !privateKeyRaw
+    ) {
+        throw new Error(
+            'Firebase Admin credentials are missing. Add FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in Vercel Environment Variables.'
+        );
+    }
+
+    const privateKey =
+        String(
+            privateKeyRaw
+        ).replace(
+            /\\n/g,
+            '\n'
+        );
+
+    admin.initializeApp({
+        credential:
+            admin.credential.cert({
                 projectId:
-                    process.env.FIREBASE_PROJECT_ID,
+                    projectId,
 
                 clientEmail:
-                    process.env.FIREBASE_CLIENT_EMAIL,
+                    clientEmail,
 
                 privateKey:
-                    privateKey.replace(
-                        /\\n/g,
-                        '\n'
-                    )
+                    privateKey
             })
-        });
+    });
+
+    return admin;
+}
+
+function getDB() {
+    initializeFirebaseAdmin();
+
+    if (cached.db) {
+        return cached.db;
     }
 
     cached.db =
@@ -171,6 +191,38 @@ function normalizeReferralCode(
             /[^A-Z0-9]/g,
             ''
         );
+}
+
+// ============================================================
+// REFERRAL CODE GENERATOR
+// ============================================================
+
+const REFERRAL_CODE_LENGTH = 8;
+
+const REFERRAL_CODE_ALPHABET =
+    'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function generateReferralCode() {
+    const bytes =
+        crypto.randomBytes(
+            REFERRAL_CODE_LENGTH
+        );
+
+    let code = '';
+
+    for (
+        let i = 0;
+        i < REFERRAL_CODE_LENGTH;
+        i++
+    ) {
+        code +=
+            REFERRAL_CODE_ALPHABET[
+                bytes[i] %
+                REFERRAL_CODE_ALPHABET.length
+            ];
+    }
+
+    return code;
 }
 
 function isValidRechargeAmount(
@@ -483,6 +535,11 @@ async function decodeFirebaseToken(
 
         throw error;
     }
+
+    // IMPORTANT:
+    // Firebase Admin must be initialized BEFORE
+    // calling admin.auth().verifyIdToken().
+    initializeFirebaseAdmin();
 
     return admin
         .auth()
