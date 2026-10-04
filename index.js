@@ -25,6 +25,7 @@ const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 const INSTALL_ID_MAX_LENGTH = 200;
+const RIDE_EVENT_ID_MAX_LENGTH = 200;
 
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET =
@@ -115,7 +116,10 @@ function getRazorpay() {
     const keySecret =
         process.env.RAZORPAY_KEY_SECRET;
 
-    if (!keyId || !keySecret) {
+    if (
+        !keyId ||
+        !keySecret
+    ) {
         throw new Error(
             'Razorpay keys are missing. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Vercel Environment Variables.'
         );
@@ -184,6 +188,23 @@ function normalizeInstallId(
             0,
             INSTALL_ID_MAX_LENGTH
         );
+}
+
+function normalizeRideEventId(
+    rideEventId
+) {
+    if (
+        rideEventId ===
+        undefined ||
+        rideEventId ===
+        null
+    ) {
+        return '';
+    }
+
+    return String(
+        rideEventId
+    ).trim();
 }
 
 function normalizeReferralCode(
@@ -370,6 +391,18 @@ function hashPhoneForAuth(
         .createHash('sha256')
         .update(
             `driver-ride-picker-auth:${phone}`
+        )
+        .digest('hex');
+}
+
+function createRideEventDocumentId(
+    phone,
+    rideEventId
+) {
+    return crypto
+        .createHash('sha256')
+        .update(
+            `driver-ride-picker-ride-event:${phone}:${rideEventId}`
         )
         .digest('hex');
 }
@@ -880,9 +913,11 @@ async function recordPinFailure(
             transaction.set(
                 ref,
                 {
-                    failures,
+                    failures:
+                        failures,
 
-                    lockedUntilMs,
+                    lockedUntilMs:
+                        lockedUntilMs,
 
                     lastFailedAt:
                         admin.firestore
@@ -896,11 +931,14 @@ async function recordPinFailure(
             );
 
             result = {
-                failures,
+                failures:
+                    failures,
 
-                locked,
+                locked:
+                    locked,
 
-                lockedUntilMs
+                lockedUntilMs:
+                    lockedUntilMs
             };
         }
     );
@@ -978,7 +1016,6 @@ async function createUniqueReferralCode(
                         codeRef,
                         {
                             code:
-
                                 code,
 
                             userId:
@@ -1313,8 +1350,7 @@ app.post(
                 }
 
                 if (
-                    typeof userData
-                        .credits !==
+                    typeof userData.credits !==
                     'number'
                 ) {
                     updates.credits =
@@ -1325,8 +1361,7 @@ app.post(
                 }
 
                 if (
-                    typeof userData
-                        .totalRides !==
+                    typeof userData.totalRides !==
                     'number'
                 ) {
                     updates.totalRides =
@@ -1408,8 +1443,7 @@ app.post(
 
                         const possibleReferrerPhone =
                             normalizePhone(
-                                referralData
-                                    .userId ||
+                                referralData.userId ||
                                 ''
                             );
 
@@ -1684,8 +1718,7 @@ app.post(
                     );
 
                 if (
-                    !transactionResult
-                        .created
+                    !transactionResult.created
                 ) {
                     const racedUser =
                         await userRef.get();
@@ -1755,8 +1788,7 @@ app.post(
                         false;
                 } else {
                     trialCreditsAdded =
-                        transactionResult
-                            .trialGranted
+                        transactionResult.trialGranted
                             ? FREE_START_CREDITS
                             : 0;
 
@@ -1821,8 +1853,7 @@ app.post(
 
                                 const currentCredits =
                                     Number(
-                                        referrerData
-                                            .credits ||
+                                        referrerData.credits ||
                                         0
                                     );
 
@@ -1906,8 +1937,7 @@ app.post(
                 message:
                     isNewUser
                         ? (
-                            trialCreditsAdded >
-                            0
+                            trialCreditsAdded > 0
                                 ? 'Welcome! 10 free credits added.'
                                 : 'Account created. This installation has already used the free trial.'
                         )
@@ -2060,7 +2090,32 @@ app.get(
 
 // ============================================================
 // DEDUCT ONE CREDIT FOR SUCCESSFUL RIDE
+// SERVER-SIDE EXACTLY-ONCE
 // ============================================================
+
+/*
+ * RULES:
+ *
+ * Match/filter/scoring      = 0 credit
+ * Accept/Confirm/Match      = 0 credit
+ * Successful ride signal    = 1 credit
+ * Same ride, repeated       = 0 extra credit
+ * Same rideEventId retry    = 0 extra credit
+ * New ride                  = new rideEventId
+ *
+ * The client MUST send the same rideEventId when retrying the
+ * same successful ride.
+ *
+ * Firestore transaction:
+ *
+ *   First request:
+ *       create rideCreditEvents record
+ *       deduct 1 credit
+ *
+ *   Same request again:
+ *       existing event found
+ *       do NOT deduct again
+ */
 
 app.post(
     '/api/ride/deduct-credit',
@@ -2087,6 +2142,46 @@ app.post(
                 });
             }
 
+            const rideEventId =
+                normalizeRideEventId(
+                    req.body.rideEventId
+                );
+
+            /*
+             * No automatic ID is generated here.
+             *
+             * Reason:
+             * If the network request succeeds but the response is lost,
+             * the client must retry with the SAME rideEventId.
+             *
+             * Generating a new ID on the server would make that retry
+             * look like a new ride and could deduct twice.
+             */
+            if (
+                !rideEventId
+            ) {
+                return res.status(400).json({
+                    success:
+                        false,
+
+                    message:
+                        'rideEventId is required for successful ride credit deduction.'
+                });
+            }
+
+            if (
+                rideEventId.length >
+                RIDE_EVENT_ID_MAX_LENGTH
+            ) {
+                return res.status(400).json({
+                    success:
+                        false,
+
+                    message:
+                        `rideEventId must be ${RIDE_EVENT_ID_MAX_LENGTH} characters or fewer.`
+                });
+            }
+
             const db =
                 getDB();
 
@@ -2099,18 +2194,86 @@ app.post(
                         phone
                     );
 
+            const rideEventRef =
+                db
+                    .collection(
+                        'rideCreditEvents'
+                    )
+                    .doc(
+                        createRideEventDocumentId(
+                            phone,
+                            rideEventId
+                        )
+                    );
+
             let remainingCredits =
                 0;
 
+            let alreadyProcessed =
+                false;
+
             await db.runTransaction(
                 async transaction => {
-                    const snapshot =
+                    /*
+                     * Read the idempotency record first.
+                     */
+                    const rideEventSnapshot =
+                        await transaction.get(
+                            rideEventRef
+                        );
+
+                    /*
+                     * Always read the current user balance as well.
+                     * This keeps the duplicate response's balance current,
+                     * even if the driver later recharged or used credits.
+                     */
+                    const userSnapshot =
                         await transaction.get(
                             userRef
                         );
 
                     if (
-                        !snapshot.exists
+                        rideEventSnapshot.exists
+                    ) {
+                        if (
+                            !userSnapshot.exists
+                        ) {
+                            const error =
+                                new Error(
+                                    'Driver account not found.'
+                                );
+
+                            error.statusCode =
+                                404;
+
+                            throw error;
+                        }
+
+                        const currentUserData =
+                            userSnapshot.data() ||
+                            {};
+
+                        remainingCredits =
+                            Number(
+                                currentUserData
+                                    .credits ||
+                                0
+                            );
+
+                        alreadyProcessed =
+                            true;
+
+                        /*
+                         * IMPORTANT:
+                         * No user update.
+                         * No new event creation.
+                         * No credit deduction.
+                         */
+                        return;
+                    }
+
+                    if (
+                        !userSnapshot.exists
                     ) {
                         const error =
                             new Error(
@@ -2123,13 +2286,13 @@ app.post(
                         throw error;
                     }
 
-                    const data =
-                        snapshot.data() ||
+                    const userData =
+                        userSnapshot.data() ||
                         {};
 
                     const currentCredits =
                         Number(
-                            data.credits ||
+                            userData.credits ||
                             0
                         );
 
@@ -2151,6 +2314,48 @@ app.post(
                     remainingCredits =
                         currentCredits - 1;
 
+                    const totalRides =
+                        Number(
+                            userData.totalRides ||
+                            0
+                        ) + 1;
+
+                    /*
+                     * Create the idempotency record AND update the
+                     * user in the SAME Firestore transaction.
+                     *
+                     * If two identical requests arrive at the same time,
+                     * Firestore transaction retry/conflict handling will
+                     * allow only one successful deduction for this event.
+                     */
+                    transaction.set(
+                        rideEventRef,
+                        {
+                            phone:
+                                phone,
+
+                            rideEventId:
+                                rideEventId,
+
+                            creditsDeducted:
+                                1,
+
+                            remainingCredits:
+                                remainingCredits,
+
+                            totalRidesAfter:
+                                totalRides,
+
+                            status:
+                                'processed',
+
+                            createdAt:
+                                admin.firestore
+                                    .FieldValue
+                                    .serverTimestamp()
+                        }
+                    );
+
                     transaction.update(
                         userRef,
                         {
@@ -2158,10 +2363,7 @@ app.post(
                                 remainingCredits,
 
                             totalRides:
-                                Number(
-                                    data.totalRides ||
-                                    0
-                                ) + 1,
+                                totalRides,
 
                             updatedAt:
                                 admin.firestore
@@ -2169,12 +2371,50 @@ app.post(
                                     .serverTimestamp()
                         }
                     );
+
+                    alreadyProcessed =
+                        false;
                 }
             );
 
+            /*
+             * Duplicate/retry:
+             * same event already processed, so 0 additional credit.
+             */
+            if (
+                alreadyProcessed
+            ) {
+                return res.json({
+                    success:
+                        true,
+
+                    alreadyProcessed:
+                        true,
+
+                    creditsDeducted:
+                        0,
+
+                    message:
+                        'Ride credit already processed for this ride.',
+
+                    remainingCredits:
+                        remainingCredits
+                });
+            }
+
+            /*
+             * First successful processing:
+             * exactly 1 credit deducted.
+             */
             return res.json({
                 success:
                     true,
+
+                alreadyProcessed:
+                    false,
+
+                creditsDeducted:
+                    1,
 
                 message:
                     'Ride credit deducted.',
