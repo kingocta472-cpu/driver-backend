@@ -24,6 +24,88 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
+// ============================================================
+// APP UPDATE CONFIG
+// ============================================================
+//
+// These values are controlled from Vercel Environment Variables.
+//
+// APP_LATEST_VERSION
+//     Latest Android app version available to drivers.
+//     Example: 1.0.1
+//
+// APP_MINIMUM_VERSION
+//     Oldest Android version allowed to continue.
+//     Example: 1.0.0
+//
+// APP_APK_URL
+//     Public HTTPS URL of the latest APK.
+//
+// APP_UPDATE_TITLE
+//     Title shown by the Android update dialog.
+//
+// APP_UPDATE_MESSAGE
+//     Short update message.
+//
+// APP_RELEASE_NOTES
+//     Release notes shown to the driver.
+//
+// APP_PUBLISHED_AT
+//     Optional ISO timestamp for this release.
+//
+// IMPORTANT:
+// - If currentVersion < APP_LATEST_VERSION and APP_APK_URL is valid HTTPS,
+//   updateAvailable becomes true.
+// - If currentVersion < APP_MINIMUM_VERSION,
+//   forceUpdate becomes true.
+// - If currentVersion == APP_LATEST_VERSION,
+//   updateAvailable becomes false.
+// - APK URL must be HTTPS before the update button is enabled.
+// - This endpoint is public so the app can check before login.
+// ============================================================
+
+const APP_LATEST_VERSION =
+    String(
+        process.env.APP_LATEST_VERSION ||
+        '1.0.0'
+    ).trim();
+
+const APP_MINIMUM_VERSION =
+    String(
+        process.env.APP_MINIMUM_VERSION ||
+        APP_LATEST_VERSION
+    ).trim();
+
+const APP_APK_URL =
+    String(
+        process.env.APP_APK_URL ||
+        ''
+    ).trim();
+
+const APP_UPDATE_TITLE =
+    String(
+        process.env.APP_UPDATE_TITLE ||
+        'New Update Available'
+    ).trim();
+
+const APP_UPDATE_MESSAGE =
+    String(
+        process.env.APP_UPDATE_MESSAGE ||
+        'A new Driver Ride Picker update is available.'
+    ).trim();
+
+const APP_RELEASE_NOTES =
+    String(
+        process.env.APP_RELEASE_NOTES ||
+        'Performance improvements and bug fixes.'
+    ).trim();
+
+const APP_PUBLISHED_AT =
+    String(
+        process.env.APP_PUBLISHED_AT ||
+        ''
+    ).trim();
+
 const INSTALL_ID_MAX_LENGTH = 200;
 const RIDE_EVENT_ID_MAX_LENGTH = 200;
 
@@ -249,6 +331,102 @@ function isValidPin(
 }
 
 // ============================================================
+// APP VERSION HELPERS
+// ============================================================
+
+function parseVersion(version) {
+    const cleaned =
+        String(version || '')
+            .trim()
+            .replace(
+                /^v/i,
+                ''
+            );
+
+    if (
+        !/^\d+(?:\.\d+){0,3}$/.test(
+            cleaned
+        )
+    ) {
+        return null;
+    }
+
+    return cleaned
+        .split('.')
+        .map(
+            part => Number(part)
+        );
+}
+
+function compareVersions(
+    left,
+    right
+) {
+    const a =
+        parseVersion(left);
+
+    const b =
+        parseVersion(right);
+
+    if (
+        !a ||
+        !b
+    ) {
+        return null;
+    }
+
+    const length =
+        Math.max(
+            a.length,
+            b.length
+        );
+
+    for (
+        let i = 0;
+        i < length;
+        i++
+    ) {
+        const av =
+            a[i] || 0;
+
+        const bv =
+            b[i] || 0;
+
+        if (
+            av > bv
+        ) {
+            return 1;
+        }
+
+        if (
+            av < bv
+        ) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+function isValidHttpsUrl(
+    value
+) {
+    try {
+        const parsed =
+            new URL(
+                value
+            );
+
+        return (
+            parsed.protocol ===
+            'https:'
+        );
+    } catch (_) {
+        return false;
+    }
+}
+
+// ============================================================
 // REFERRAL CODE GENERATOR
 // ============================================================
 
@@ -262,7 +440,8 @@ function generateReferralCode() {
 
     for (
         let i = 0;
-        i < REFERRAL_CODE_LENGTH;
+        i <
+        REFERRAL_CODE_LENGTH;
         i++
     ) {
         code +=
@@ -559,7 +738,9 @@ async function verifyFirebaseIdentity(
                 req
             );
 
-        if (!decoded.uid) {
+        if (
+            !decoded.uid
+        ) {
             return res.status(401).json({
                 success:
                     false,
@@ -623,7 +804,9 @@ async function verifyFirebaseToken(
                 req
             );
 
-        if (!decoded.uid) {
+        if (
+            !decoded.uid
+        ) {
             return res.status(401).json({
                 success:
                     false,
@@ -1056,6 +1239,216 @@ app.get(
         res.send(
             'Driver Ride Picker Backend is Running!'
         );
+    }
+);
+
+// ============================================================
+// APP UPDATE STATUS
+// ============================================================
+//
+// Public endpoint.
+// Android app can call this on startup and/or when dashboard opens.
+//
+// Example:
+//   GET /api/app/update?currentVersion=1.0.0
+//
+// Response example:
+// {
+//   success: true,
+//   currentVersion: "1.0.0",
+//   latestVersion: "1.0.1",
+//   minimumVersion: "1.0.0",
+//   updateAvailable: true,
+//   forceUpdate: false,
+//   apkUrl: "https://example.com/driver-ride-picker-1.0.1.apk",
+//   title: "New Update Available",
+//   message: "...",
+//   releaseNotes: "...",
+//   publishedAt: "..."
+// }
+//
+// IMPORTANT:
+// No Firebase login is required for this endpoint.
+// This allows an old app version to discover that an update exists.
+// ============================================================
+
+app.get(
+    '/api/app/update',
+    (req, res) => {
+        try {
+            // Never let an intermediary cache update state.
+            res.set(
+                'Cache-Control',
+                'no-store, no-cache, must-revalidate, proxy-revalidate'
+            );
+
+            res.set(
+                'Pragma',
+                'no-cache'
+            );
+
+            res.set(
+                'Expires',
+                '0'
+            );
+
+            const currentVersion =
+                String(
+                    req.query.currentVersion ||
+                    ''
+                ).trim();
+
+            const latestVersionValid =
+                Boolean(
+                    parseVersion(
+                        APP_LATEST_VERSION
+                    )
+                );
+
+            const minimumVersionValid =
+                Boolean(
+                    parseVersion(
+                        APP_MINIMUM_VERSION
+                    )
+                );
+
+            if (
+                !latestVersionValid ||
+                !minimumVersionValid
+            ) {
+                return res.status(500).json({
+                    success:
+                        false,
+
+                    message:
+                        'App update configuration contains an invalid version.'
+                });
+            }
+
+            const latestVsMinimum =
+                compareVersions(
+                    APP_LATEST_VERSION,
+                    APP_MINIMUM_VERSION
+                );
+
+            if (
+                latestVsMinimum !== null &&
+                latestVsMinimum < 0
+            ) {
+                return res.status(500).json({
+                    success:
+                        false,
+
+                    message:
+                        'App update configuration is invalid: minimum version is newer than latest version.'
+                });
+            }
+
+            const hasValidApkUrl =
+                isValidHttpsUrl(
+                    APP_APK_URL
+                );
+
+            let updateAvailable =
+                false;
+
+            let forceUpdate =
+                false;
+
+            let currentVsLatest =
+                null;
+
+            let currentVsMinimum =
+                null;
+
+            if (
+                currentVersion
+            ) {
+                currentVsLatest =
+                    compareVersions(
+                        currentVersion,
+                        APP_LATEST_VERSION
+                    );
+
+                currentVsMinimum =
+                    compareVersions(
+                        currentVersion,
+                        APP_MINIMUM_VERSION
+                    );
+
+                /*
+                 * Update becomes available only when:
+                 *
+                 *   current < latest
+                 *   AND
+                 *   a valid HTTPS APK URL exists.
+                 */
+                updateAvailable =
+                    currentVsLatest !== null &&
+                    currentVsLatest < 0 &&
+                    hasValidApkUrl;
+
+                /*
+                 * Mandatory update is controlled independently
+                 * by minimum version.
+                 */
+                forceUpdate =
+                    currentVsMinimum !== null &&
+                    currentVsMinimum < 0;
+            }
+
+            return res.json({
+                success:
+                    true,
+
+                currentVersion:
+                    currentVersion ||
+                    null,
+
+                latestVersion:
+                    APP_LATEST_VERSION,
+
+                minimumVersion:
+                    APP_MINIMUM_VERSION,
+
+                updateAvailable:
+                    updateAvailable,
+
+                forceUpdate:
+                    forceUpdate,
+
+                apkUrl:
+                    hasValidApkUrl
+                        ? APP_APK_URL
+                        : '',
+
+                title:
+                    APP_UPDATE_TITLE,
+
+                message:
+                    APP_UPDATE_MESSAGE,
+
+                releaseNotes:
+                    APP_RELEASE_NOTES,
+
+                publishedAt:
+                    APP_PUBLISHED_AT ||
+                    null
+            });
+        } catch (error) {
+            console.error(
+                'APP UPDATE STATUS ERROR:',
+                error
+            );
+
+            return res.status(500).json({
+                success:
+                    false,
+
+                message:
+                    'Unable to check app update status.'
+            });
+        }
     }
 );
 
