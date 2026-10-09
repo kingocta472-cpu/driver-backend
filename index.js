@@ -10,36 +10,561 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// OPTIONAL DRIVER ACTIVITY TRACKER
+// DRIVER ACTIVITY TRACKER - INLINE
 // ============================================================
 //
 // IMPORTANT:
-// tracker.js abhi alag file ke roop me add kiya jayega.
+// - Koi tracker.js file nahi hai
+// - Tracker isi index.js ke andar hai
+// - Android app me koi change nahi
+// - GPS/location tracking nahi
+// - PIN/token/payment data tracker me store nahi
+// - Existing ride/filter/credit/payment logic unchanged
 //
-// Isko optional rakha gaya hai taaki:
-// - tracker.js na hone par backend crash na ho
-// - existing backend normal tarike se chale
-// - tracker.js baad me safely add kiya ja sake
+// TRACKING:
+// - Last backend activity
+// - Active: <= 5 minutes
+// - Recent: 5-15 minutes
+// - Inactive: > 15 minutes
 //
-// Tracker existing ride/filter/credit/payment logic ko change nahi karta.
+// Firestore collection:
+// driverActivity
 // ============================================================
 
-let driverTracker = null;
+const TRACKER_COLLECTION =
+    'driverActivity';
 
-try {
-    driverTracker = require('./tracker');
+const TRACKER_WRITE_INTERVAL_MS =
+    5 * 60 * 1000;
 
-    console.log(
-        'DRIVER TRACKER: module loaded.'
-    );
-} catch (error) {
-    console.log(
-        'DRIVER TRACKER: not installed yet. Backend running normally.'
+let trackerCache =
+    global.driverRidePickerTrackerCache;
+
+if (!trackerCache) {
+    trackerCache =
+        global.driverRidePickerTrackerCache = {
+            lastWriteByDriver:
+                new Map()
+        };
+}
+
+// ============================================================
+// TRACKER PHONE HASH
+// ============================================================
+
+function trackerHashPhone(
+    phone
+) {
+    return crypto
+        .createHash('sha256')
+        .update(
+            `driver-ride-picker-tracker:${phone}`
+        )
+        .digest('hex');
+}
+
+// ============================================================
+// TRACKER PHONE MASK
+// ============================================================
+
+function trackerMaskPhone(
+    phone
+) {
+    const normalized =
+        normalizePhone(
+            phone
+        );
+
+    if (!normalized) {
+        return '**********';
+    }
+
+    return (
+        normalized.slice(0, 2) +
+        '******' +
+        normalized.slice(-2)
     );
 }
 
-app.use(cors());
-app.use(express.json());
+// ============================================================
+// TRACKER WRITE THROTTLE
+// ============================================================
+
+function trackerShouldWrite(
+    driverKey
+) {
+    const now =
+        Date.now();
+
+    const lastWrite =
+        trackerCache.lastWriteByDriver.get(
+            driverKey
+        ) || 0;
+
+    if (
+        now - lastWrite <
+        TRACKER_WRITE_INTERVAL_MS
+    ) {
+        return false;
+    }
+
+    trackerCache.lastWriteByDriver.set(
+        driverKey,
+        now
+    );
+
+    if (
+        trackerCache.lastWriteByDriver.size >
+        5000
+    ) {
+        const cutoff =
+            now -
+            TRACKER_WRITE_INTERVAL_MS * 2;
+
+        for (
+            const [
+                key,
+                timestamp
+            ] of trackerCache.lastWriteByDriver
+        ) {
+            if (
+                timestamp <
+                cutoff
+            ) {
+                trackerCache.lastWriteByDriver.delete(
+                    key
+                );
+            }
+        }
+    }
+
+    return true;
+}
+
+// ============================================================
+// RECORD DRIVER ACTIVITY
+// ============================================================
+
+async function recordDriverActivity(
+    {
+        phone,
+        uid,
+        method,
+        endpoint
+    }
+) {
+    const normalizedPhone =
+        normalizePhone(
+            phone
+        );
+
+    if (!normalizedPhone) {
+        return;
+    }
+
+    const driverKey =
+        trackerHashPhone(
+            normalizedPhone
+        );
+
+    if (
+        !trackerShouldWrite(
+            driverKey
+        )
+    ) {
+        return;
+    }
+
+    try {
+        const db =
+            getDB();
+
+        await db
+            .collection(
+                TRACKER_COLLECTION
+            )
+            .doc(
+                driverKey
+            )
+            .set(
+                {
+                    driverId:
+                        driverKey,
+
+                    phoneMasked:
+                        trackerMaskPhone(
+                            normalizedPhone
+                        ),
+
+                    firebaseUid:
+                        String(
+                            uid || ''
+                        ),
+
+                    lastSeenAt:
+                        admin.firestore
+                            .FieldValue
+                            .serverTimestamp(),
+
+                    lastMethod:
+                        String(
+                            method || ''
+                        ).slice(
+                            0,
+                            20
+                        ),
+
+                    lastEndpoint:
+                        String(
+                            endpoint || ''
+                        ).slice(
+                            0,
+                            200
+                        ),
+
+                    updatedAt:
+                        admin.firestore
+                            .FieldValue
+                            .serverTimestamp()
+                },
+                {
+                    merge:
+                        true
+                }
+            );
+    } catch (error) {
+        console.error(
+            'DRIVER ACTIVITY TRACKER WRITE ERROR:',
+            error
+        );
+    }
+}
+
+// ============================================================
+// TRACKER ADMIN SECURITY
+// ============================================================
+
+function verifyTrackerAdminKey(
+    req
+) {
+    const configuredKey =
+        String(
+            process.env.TRACKER_ADMIN_KEY ||
+            ''
+        );
+
+    const suppliedKey =
+        String(
+            req.headers[
+                'x-tracker-admin-key'
+            ] ||
+            ''
+        );
+
+    if (
+        !configuredKey ||
+        !suppliedKey
+    ) {
+        return false;
+    }
+
+    const expected =
+        Buffer.from(
+            configuredKey,
+            'utf8'
+        );
+
+    const supplied =
+        Buffer.from(
+            suppliedKey,
+            'utf8'
+        );
+
+    if (
+        expected.length !==
+        supplied.length
+    ) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(
+        expected,
+        supplied
+    );
+}
+
+// ============================================================
+// TRACKER STATUS
+// ============================================================
+
+function getTrackerStatus(
+    lastSeenMs
+) {
+    const age =
+        Date.now() -
+        lastSeenMs;
+
+    if (
+        age <=
+        5 * 60 * 1000
+    ) {
+        return 'active';
+    }
+
+    if (
+        age <=
+        15 * 60 * 1000
+    ) {
+        return 'recent';
+    }
+
+    return 'inactive';
+}
+
+// ============================================================
+// TRACKER TIMESTAMP
+// ============================================================
+
+function trackerTimestampToIso(
+    timestamp
+) {
+    if (!timestamp) {
+        return null;
+    }
+
+    if (
+        typeof timestamp.toDate ===
+        'function'
+    ) {
+        return timestamp
+            .toDate()
+            .toISOString();
+    }
+
+    return null;
+}
+
+// ============================================================
+// GET DRIVER TRACKER SNAPSHOT
+// ============================================================
+
+async function getDriverTrackerSnapshot() {
+    const db =
+        getDB();
+
+    const now =
+        Date.now();
+
+    const activeCutoff =
+        now -
+        5 * 60 * 1000;
+
+    const recentCutoff =
+        now -
+        15 * 60 * 1000;
+
+    const today =
+        new Date();
+
+    today.setHours(
+        0,
+        0,
+        0,
+        0
+    );
+
+    const usersSnapshot =
+        await db
+            .collection(
+                'users'
+            )
+            .count()
+            .get();
+
+    const activitySnapshot =
+        await db
+            .collection(
+                TRACKER_COLLECTION
+            )
+            .orderBy(
+                'lastSeenAt',
+                'desc'
+            )
+            .limit(
+                200
+            )
+            .get();
+
+    let activeNow = 0;
+    let active15Min = 0;
+    let activeToday = 0;
+
+    const drivers = [];
+
+    activitySnapshot.forEach(
+        doc => {
+            const data =
+                doc.data() ||
+                {};
+
+            const lastSeen =
+                data.lastSeenAt;
+
+            const lastSeenMs =
+                lastSeen &&
+                typeof lastSeen.toMillis ===
+                    'function'
+                    ? lastSeen.toMillis()
+                    : 0;
+
+            const status =
+                lastSeenMs
+                    ? getTrackerStatus(
+                        lastSeenMs
+                    )
+                    : 'inactive';
+
+            if (
+                lastSeenMs >=
+                activeCutoff
+            ) {
+                activeNow++;
+            }
+
+            if (
+                lastSeenMs >=
+                recentCutoff
+            ) {
+                active15Min++;
+            }
+
+            if (
+                lastSeenMs >=
+                today.getTime()
+            ) {
+                activeToday++;
+            }
+
+            drivers.push({
+                driverId:
+                    String(
+                        data.driverId ||
+                        doc.id
+                    ),
+
+                phone:
+                    String(
+                        data.phoneMasked ||
+                        '**********'
+                    ),
+
+                status:
+                    status,
+
+                lastSeenAt:
+                    trackerTimestampToIso(
+                        lastSeen
+                    ),
+
+                method:
+                    String(
+                        data.lastMethod ||
+                        ''
+                    ),
+
+                endpoint:
+                    String(
+                        data.lastEndpoint ||
+                        ''
+                    )
+            });
+        }
+    );
+
+    return {
+        success:
+            true,
+
+        generatedAt:
+            new Date()
+                .toISOString(),
+
+        summary: {
+            totalDrivers:
+                Number(
+                    usersSnapshot
+                        .data()
+                        .count ||
+                    0
+                ),
+
+            activeNow:
+                activeNow,
+
+            active15Min:
+                active15Min,
+
+            activeToday:
+                activeToday
+        },
+
+        drivers:
+            drivers
+    };
+}
+
+// ============================================================
+// TRACKER ADMIN API
+// ============================================================
+//
+// GET:
+// /api/admin/tracker
+//
+// Header:
+// x-tracker-admin-key: <TRACKER_ADMIN_KEY>
+//
+// ============================================================
+
+async function handleDriverTrackerAdmin(
+    req,
+    res
+) {
+    if (
+        !verifyTrackerAdminKey(
+            req
+        )
+    ) {
+        return res.status(401).json({
+            success:
+                false,
+
+            message:
+                'Unauthorized tracker access.'
+        });
+    }
+
+    try {
+        const data =
+            await getDriverTrackerSnapshot();
+
+        return res.json(
+            data
+        );
+    } catch (error) {
+        console.error(
+            'TRACKER SNAPSHOT ERROR:',
+            error
+        );
+
+        return res.status(500).json({
+            success:
+                false,
+
+            message:
+                'Unable to load driver activity tracker.'
+        });
+    }
+}
 
 // ============================================================
 // CONFIG
@@ -898,19 +1423,16 @@ async function verifyFirebaseToken(
         // DRIVER ACTIVITY TRACKER
         // ====================================================
         //
-        // Tracker errors are intentionally ignored so tracking
-        // can NEVER block normal driver API requests.
+        // NON-BLOCKING:
+        // Tracker Firestore write ki wajah se normal API
+        // request wait nahi karegi.
         //
-        // This does not change ride/filter/credit/payment logic.
+        // Tracker fail ho jaye to bhi normal backend chalega.
         // ====================================================
 
-        if (
-            driverTracker &&
-            typeof driverTracker.recordDriverActivity ===
-                'function'
-        ) {
-            try {
-                await driverTracker.recordDriverActivity({
+        try {
+            Promise.resolve(
+                recordDriverActivity({
                     phone:
                         req.firebaseUser.phone,
 
@@ -922,13 +1444,20 @@ async function verifyFirebaseToken(
 
                     endpoint:
                         req.originalUrl
-                });
-            } catch (trackerError) {
-                console.error(
-                    'DRIVER ACTIVITY TRACKER ERROR:',
-                    trackerError
-                );
-            }
+                })
+            ).catch(
+                trackerError => {
+                    console.error(
+                        'DRIVER ACTIVITY TRACKER ERROR:',
+                        trackerError
+                    );
+                }
+            );
+        } catch (trackerError) {
+            console.error(
+                'DRIVER ACTIVITY TRACKER ERROR:',
+                trackerError
+            );
         }
 
         next();
@@ -1388,7 +1917,6 @@ app.get(
                     currentVsLatest < 0 &&
                     hasValidApkUrl;
 
-                // Mandatory update only when a usable APK URL exists.
                 forceUpdate =
                     currentVsMinimum !== null &&
                     currentVsMinimum < 0 &&
@@ -1454,54 +1982,21 @@ app.get(
 // PRIVATE DRIVER TRACKER ADMIN ENDPOINT
 // ============================================================
 //
-// This endpoint is intentionally unavailable until tracker.js
-// is installed.
-//
-// Later:
-// GET /api/admin/tracker
+// GET:
+// /api/admin/tracker
 //
 // Header:
 // x-tracker-admin-key: <TRACKER_ADMIN_KEY>
 //
-// The tracker module itself will verify the admin key.
 // ============================================================
 
 app.get(
     '/api/admin/tracker',
     async (req, res) => {
-        if (
-            !driverTracker ||
-            typeof driverTracker.handleTrackerAdmin !==
-                'function'
-        ) {
-            return res.status(404).json({
-                success:
-                    false,
-
-                message:
-                    'Driver activity tracker is not installed yet.'
-            });
-        }
-
-        try {
-            return await driverTracker.handleTrackerAdmin(
-                req,
-                res
-            );
-        } catch (error) {
-            console.error(
-                'TRACKER ADMIN ERROR:',
-                error
-            );
-
-            return res.status(500).json({
-                success:
-                    false,
-
-                message:
-                    'Unable to load driver activity tracker.'
-            });
-        }
+        return handleDriverTrackerAdmin(
+            req,
+            res
+        );
     }
 );
 
