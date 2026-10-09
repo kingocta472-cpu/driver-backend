@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+
+    <title>Driver Ride Picker | Admin Dashboard</title>
+
+    <style>
+        :root {
+            --bg: #0b1120;
+            --panel: #111b2e;
+            --panel2: #17243a;
+            --border: #293952;
+            --text: #f1f5f9;
+            --muted: #9aabc2;
+            --green: #22c55e;
+            --blue: #38bdf8;
+            --red: #f87171;
+            --orange: #fbbf24;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: Arial, Helvetica, sans-serif;
+            min-height: 100vh;
+        }
+
+        button, input {
+            font: inherit;
+        }
+
+        button {
+            cursor: pointer;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .login-screen {
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .login-card {
+            width: 100%;
+            max-width: 410px;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 20px 60px rgba(0,0,0,.3);
+        }
+
+        .brand-icon {
+            width: 64px;
+            height: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            background: #153d32;
+            border: 1px solid #23664c;
+            border-radius: 18px;
+            font-size: 32px;
+        }
+
+        h1, h2, p {
+            margin-top: 0;
+        }
+
+        .login-card h1 {
+            text-align: center;
+            font-size: 24px;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.6;
+            margin-bottom: 24px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 13px;
+            color: var(--muted);
+        }
+
+        input {
+            width: 100%;
+            background: #0b1323;
+            border: 1px solid var(--border);
+            color: white;
+            border-radius: 10px;
+            padding: 13px;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: var(--blue);
+        }
+
+        .primary-btn {
+            background: var(--green);
+            color: #052e16;
+            border: 0;
+            font-weight: bold;
+            border-radius: 10px;
+            padding: 13px 16px;
+        }
+
+        .primary-btn:hover {
+            filter: brightness(1.08);
+        }
+
+        .login-btn {
+            width: 100%;
+            margin-top: 15px;
+        }
+
+        .message {
+            font-size: 13px;
+            line-height: 1.5;
+            margin-top: 14px;
+            overflow-wrap: anywhere;
+        }
+
+        .error {
+            color: var(--red);
+        }
+
+        .success {
+            color: var(--green);
+        }
+
+        .muted {
+            color: var(--muted);
+        }
+
+        .dashboard {
+            max-width: 1450px;
+            margin: 0 auto;
+            padding: 22px;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+            margin-bottom: 25px;
+        }
+
+        .brand h1 {
+            font-size: 25px;
+            margin-bottom: 7px;
+        }
+
+        .brand p {
+            color: var(--muted);
+            margin-bottom: 0;
+            font-size: 13px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .secondary-btn {
+            background: var(--panel2);
+            border: 1px solid var(--border);
+            color: var(--text);
+            border-radius: 9px;
+            padding: 11px 14px;
+        }
+
+        .logout-btn {
+            border-color: #6b303b;
+            color: #fca5a5;
+        }
+
+        .notice {
+            padding: 12px 15px;
+            border: 1px solid var(--border);
+            background: var(--panel);
+            color: var(--muted);
+            border-radius: 10px;
+            margin-bottom: 20px;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 15px;
+            margin-bottom: 22px;
+        }
+
+        .stat-card {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            padding: 20px;
+            border-radius: 14px;
+            min-width: 0;
+        }
+
+        .stat-label {
+            color: var(--muted);
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            overflow-wrap: anywhere;
+        }
+
+        .stat-foot {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 8px;
+        }
+
+        .green {
+            color: var(--green);
+        }
+
+        .blue {
+            color: var(--blue);
+        }
+
+        .orange {
+            color: var(--orange);
+        }
+
+        .table-panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            overflow: hidden;
+        }
+
+        .table-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+            padding: 18px;
+            flex-wrap: wrap;
+        }
+
+        .table-header h2 {
+            font-size: 18px;
+            margin-bottom: 5px;
+        }
+
+        .table-header p {
+            font-size: 12px;
+            color: var(--muted);
+            margin-bottom: 0;
+        }
+
+        .search {
+            max-width: 320px;
+        }
+
+        .table-wrap {
+            width: 100%;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 760px;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 14px 16px;
+            border-top: 1px solid var(--border);
+            font-size: 13px;
+            vertical-align: top;
+        }
+
+        th {
+            color: var(--muted);
+            background: #0e182a;
+            font-weight: 600;
+        }
+
+        td {
+            overflow-wrap: anywhere;
+        }
+
+        .status {
+            display: inline-block;
+            border-radius: 20px;
+            padding: 5px 9px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .status-active {
+            color: #86efac;
+            background: #123c2b;
+        }
+
+        .status-recent {
+            color: #fde68a;
+            background: #493717;
+        }
+
+        .status-inactive {
+            color: #cbd5e1;
+            background: #293548;
+        }
+
+        .empty {
+            text-align: center;
+            color: var(--muted);
+            padding: 35px 15px;
+        }
+
+        .footer {
+            color: var(--muted);
+            text-align: center;
+            font-size: 12px;
+            padding: 20px 5px;
+        }
+
+        @media (max-width: 900px) {
+            .cards {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 520px) {
+            .dashboard {
+                padding: 14px;
+            }
+
+            .brand h1 {
+                font-size: 21px;
+            }
+
+            .cards {
+                gap: 10px;
+            }
+
+            .stat-card {
+                padding: 15px;
+            }
+
+            .stat-value {
+                font-size: 27px;
+            }
+
+            .table-header {
+                align-items: stretch;
+            }
+
+            .search {
+                max-width: none;
+            }
+
+            .actions {
+                width: 100%;
+            }
+
+            .actions button {
+                flex: 1;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- ADMIN LOGIN -->
+
+    <section id="loginScreen" class="login-screen">
+        <div class="login-card">
+
+            <div class="brand-icon">🚘</div>
+
+            <h1>Driver Ride Picker</h1>
+
+            <p class="subtitle">
+                Secure Admin Dashboard<br>
+                Sign in to view driver activity.
+            </p>
+
+            <form id="loginForm">
+                <label for="adminKey">Admin Access Key</label>
+
+                <input
+                    id="adminKey"
+                    type="password"
+                    placeholder="Enter your admin key"
+                    autocomplete="current-password"
+                    required
+                >
+
+                <button
+                    id="loginButton"
+                    class="primary-btn login-btn"
+                    type="submit"
+                >
+                    Sign In
+                </button>
+
+                <div
+                    id="loginMessage"
+                    class="message"
+                    role="status"
+                    aria-live="polite"
+                ></div>
+            </form>
+
+            <p class="muted" style="font-size:12px; margin-top:20px; margin-bottom:0; line-height:1.6;">
+                Your key is kept only for this browser session.
+                Never share it with anyone.
+            </p>
+
+        </div>
+    </section>
+
+
+    <!-- DASHBOARD -->
+
+    <main id="dashboardScreen" class="dashboard hidden">
+
+        <header class="topbar">
+
+            <div class="brand">
+                <h1>🚘 Driver Activity Dashboard</h1>
+                <p>Driver Ride Picker · Admin Control Panel</p>
+            </div>
+
+            <div class="actions">
+                <button
+                    id="refreshButton"
+                    class="secondary-btn"
+                    type="button"
+                >
+                    ↻ Refresh
+                </button>
+
+                <button
+                    id="logoutButton"
+                    class="secondary-btn logout-btn"
+                    type="button"
+                >
+                    Logout
+                </button>
+            </div>
+
+        </header>
+
+        <div class="notice">
+            <strong>Activity information:</strong>
+            Active = last 5 minutes. Recent = last 15 minutes.
+            This dashboard displays recorded backend activity, not
+            continuous GPS tracking or guaranteed live app-open status.
+        </div>
+
+        <div
+            id="dashboardMessage"
+            class="message"
+            role="status"
+            aria-live="polite"
+        ></div>
+
+        <section class="cards">
+
+            <div class="stat-card">
+                <div class="stat-label">Total Registered Drivers</div>
+                <div id="totalDrivers" class="stat-value">—</div>
+                <div class="stat-foot">Users in the backend database</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Active Now</div>
+                <div id="activeNow" class="stat-value green">—</div>
+                <div class="stat-foot">Activity within 5 minutes</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Active Within 15 Minutes</div>
+                <div id="active15Min" class="stat-value blue">—</div>
+                <div class="stat-foot">Includes currently active drivers</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-label">Active Today</div>
+                <div id="activeToday" class="stat-value orange">—</div>
+                <div class="stat-foot">Recorded activity since midnight</div>
+            </div>
+
+        </section>
+
+        <section class="table-panel">
+
+            <div class="table-header">
+
+                <div>
+                    <h2>Driver Activity</h2>
+                    <p id="lastUpdated">Waiting for first update...</p>
+                </div>
+
+                <input
+                    id="searchInput"
+                    class="search"
+                    type="search"
+                    placeholder="Search phone, status or endpoint..."
+                    aria-label="Search driver activity"
+                >
+
+            </div>
+
+            <div class="table-wrap">
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Driver</th>
+                            <th>Phone</th>
+                            <th>Status</th>
+                            <th>Last Seen</th>
+                            <th>Last Method</th>
+                            <th>Last Endpoint</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="driversTable">
+                        <tr>
+                            <td colspan="6" class="empty">
+                                Sign in to load driver activity.
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+
+            </div>
+
+        </section>
+
+        <footer class="footer">
+            Driver Ride Picker · Admin Dashboard
+        </footer>
+
+    </main>
+
+
+    <script>
+        'use strict';
+
+        const API_URL = '/api/admin/tracker';
+        const SESSION_KEY = 'drp_tracker_admin_key';
+        const REFRESH_INTERVAL = 60000;
+
+        let adminKey = '';
+        let refreshTimer = null;
+        let driversData = [];
+
+        const $ = id => document.getElementById(id);
+
+        function showMessage(element, message, type) {
+            element.textContent = message;
+            element.className = 'message ' + (type || '');
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(
+                /[&<>"']/g,
+                character => ({
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                })[character]
+            );
+        }
+
+        function formatDate(value) {
+            if (!value) {
+                return 'Not available';
+            }
+
+            const date = new Date(value);
+
+            if (Number.isNaN(date.getTime())) {
+                return 'Not available';
+            }
+
+            return date.toLocaleString();
+        }
+
+        function formatNumber(value) {
+            const number = Number(value);
+
+            return Number.isFinite(number)
+                ? number.toLocaleString()
+                : '0';
+        }
+
+        function showLogin() {
+            $('loginScreen').classList.remove('hidden');
+            $('dashboardScreen').classList.add('hidden');
+        }
+
+        function showDashboard() {
+            $('loginScreen').classList.add('hidden');
+            $('dashboardScreen').classList.remove('hidden');
+        }
+
+        function stopAutoRefresh() {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+        }
+
+        function logout() {
+            stopAutoRefresh();
+
+            adminKey = '';
+            driversData = [];
+
+            try {
+                sessionStorage.removeItem(SESSION_KEY);
+            } catch (_) {
+                // Ignore unavailable session storage.
+            }
+
+            $('adminKey').value = '';
+            $('driversTable').innerHTML =
+                '<tr><td colspan="6" class="empty">Sign in to load driver activity.</td></tr>';
+
+            $('totalDrivers').textContent = '—';
+            $('activeNow').textContent = '—';
+            $('active15Min').textContent = '—';
+            $('activeToday').textContent = '—';
+            $('lastUpdated').textContent = 'Waiting for first update...';
+
+            showMessage($('loginMessage'), '', '');
+            showLogin();
+        }
+
+        async function fetchSnapshot() {
+            if (!adminKey) {
+                return;
+            }
+
+            $('refreshButton').disabled = true;
+            $('refreshButton').textContent = 'Loading...';
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'GET',
+                    headers: {
+                        'x-tracker-admin-key': adminKey,
+                        'Accept': 'application/json'
+                    },
+                    cache: 'no-store',
+                    credentials: 'same-origin'
+                });
+
+                if (response.status === 401 || response.status === 403) {
+                    logout();
+
+                    showMessage(
+                        $('loginMessage'),
+                        'Access denied. Check your admin key.',
+                        'error'
+                    );
+
+                    return;
+                }
+
+                if (!response.ok) {
+                    throw new Error(
+                        'Server returned HTTP ' + response.status
+                    );
+                }
+
+                const data = await response.json();
+
+                if (
+                    data.success !== true ||
+                    !data.summary ||
+                    !Array.isArray(data.drivers)
+                ) {
+                    throw new Error(
+                        'Unexpected dashboard response from backend.'
+                    );
+                }
+
+                renderDashboard(data);
+
+                showMessage(
+                    $('dashboardMessage'),
+                    '',
+                    ''
+                );
+
+            } catch (error) {
+                showMessage(
+                    $('dashboardMessage'),
+                    'Unable to load activity. Check your connection and backend deployment.',
+                    'error'
+                );
+
+                console.error('Dashboard refresh error:', error);
+
+            } finally {
+                $('refreshButton').disabled = false;
+                $('refreshButton').textContent = '↻ Refresh';
+            }
+        }
+
+        function renderDashboard(data) {
+            const summary = data.summary;
+
+            $('totalDrivers').textContent =
+                formatNumber(summary.totalDrivers);
+
+            $('activeNow').textContent =
+                formatNumber(summary.activeNow);
+
+            $('active15Min').textContent =
+                formatNumber(summary.active15Min);
+
+            $('activeToday').textContent =
+                formatNumber(summary.activeToday);
+
+            $('lastUpdated').textContent =
+                'Last updated: ' + formatDate(data.generatedAt) +
+                ' · Refreshes every 60 seconds';
+
+            driversData = data.drivers;
+
+            renderDrivers();
+        }
+
+        function renderDrivers() {
+            const query = $('searchInput').value
+                .trim()
+                .toLowerCase();
+
+            const filtered = driversData.filter(driver => {
+                const searchable = [
+                    driver.driverId,
+                    driver.phone,
+                    driver.status,
+                    driver.method,
+                    driver.endpoint,
+                    driver.lastSeenAt
+                ].join(' ').toLowerCase();
+
+                return searchable.includes(query);
+            });
+
+            if (filtered.length === 0) {
+                $('driversTable').innerHTML =
+                    '<tr><td colspan="6" class="empty">No matching driver activity found.</td></tr>';
+
+                return;
+            }
+
+            $('driversTable').innerHTML = filtered.map(driver => {
+                const status = String(driver.status || 'inactive')
+                    .toLowerCase();
+
+                let statusClass = 'status-inactive';
+
+                if (status === 'active') {
+                    statusClass = 'status-active';
+                } else if (status === 'recent') {
+                    statusClass = 'status-recent';
+                }
+
+                const shortId = String(driver.driverId || '')
+                    .slice(0, 12);
+
+                return `
+                    <tr>
+                        <td title="${escapeHtml(driver.driverId)}">
+                            ${escapeHtml(shortId || 'Unknown')}
+                        </td>
+                        <td>${escapeHtml(driver.phone || '**********')}</td>
+                        <td>
+                            <span class="status ${statusClass}">
+                                ${escapeHtml(status)}
+                            </span>
+                        </td>
+                        <td>${escapeHtml(formatDate(driver.lastSeenAt))}</td>
+                        <td>${escapeHtml(driver.method || '—')}</td>
+                        <td>${escapeHtml(driver.endpoint || '—')}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        $('loginForm').addEventListener('submit', async event => {
+            event.preventDefault();
+
+            const enteredKey = $('adminKey').value.trim();
+
+            if (!enteredKey) {
+                showMessage(
+                    $('loginMessage'),
+                    'Please enter your admin key.',
+                    'error'
+                );
+
+                return;
+            }
+
+            adminKey = enteredKey;
+
+            $('loginButton').disabled = true;
+            $('loginButton').textContent = 'Verifying...';
+
+            try {
+                const response = await fetch(API_URL, {
+                    method: 'GET',
+                    headers: {
+                        'x-tracker-admin-key': adminKey,
+                        'Accept': 'application/json'
+                    },
+                    cache: 'no-store',
+                    credentials: 'same-origin'
+                });
+
+                if (response.status === 401 || response.status === 403) {
+                    adminKey = '';
+
+                    showMessage(
+                        $('loginMessage'),
+                        'Incorrect admin key or access denied.',
+                        'error'
+                    );
+
+                    return;
+                }
+
+                if (!response.ok) {
+                    throw new Error(
+                        'Server returned HTTP ' + response.status
+                    );
+                }
+
+                const data = await response.json();
+
+                if (
+                    data.success !== true ||
+                    !data.summary ||
+                    !Array.isArray(data.drivers)
+                ) {
+                    throw new Error(
+                        'The backend did not return valid tracker data.'
+                    );
+                }
+
+                try {
+                    sessionStorage.setItem(SESSION_KEY, adminKey);
+                } catch (_) {
+                    // Login can still work without session storage.
+                }
+
+                showDashboard();
+                renderDashboard(data);
+
+                showMessage(
+                    $('dashboardMessage'),
+                    '',
+                    ''
+                );
+
+                stopAutoRefresh();
+
+                refreshTimer = setInterval(
+                    fetchSnapshot,
+                    REFRESH_INTERVAL
+                );
+
+            } catch (error) {
+                adminKey = '';
+
+                showMessage(
+                    $('loginMessage'),
+                    'Could not connect to the tracker API. Confirm that the backend is deployed and the dashboard is served from the same backend origin.',
+                    'error'
+                );
+
+                console.error('Admin login error:', error);
+
+            } finally {
+                $('loginButton').disabled = false;
+                $('loginButton').textContent = 'Sign In';
+            }
+        });
+
+        $('refreshButton').addEventListener(
+            'click',
+            fetchSnapshot
+        );
+
+        $('logoutButton').addEventListener(
+            'click',
+            logout
+        );
+
+        $('searchInput').addEventListener(
+            'input',
+            renderDrivers
+        );
+
+        // Try restoring the current browser-session login.
+        // The server checks the key on every API request.
+        try {
+            const savedKey = sessionStorage.getItem(SESSION_KEY);
+
+            if (savedKey) {
+                adminKey = savedKey;
+
+                fetchSnapshot().then(() => {
+                    if (adminKey) {
+                        showDashboard();
+
+                        stopAutoRefresh();
+
+                        refreshTimer = setInterval(
+                            fetchSnapshot,
+                            REFRESH_INTERVAL
+                        );
+                    }
+                });
+            }
+        } catch (_) {
+            // Manual login remains available.
+        }
+    </script>
+
+</body>
+</html>
