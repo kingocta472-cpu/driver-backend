@@ -10,6 +10,38 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================================
+// OPTIONAL DRIVER ACTIVITY TRACKER
+// ============================================================
+//
+// IMPORTANT:
+// tracker.js abhi alag file ke roop me add kiya jayega.
+//
+// Isko optional rakha gaya hai taaki:
+// - tracker.js na hone par backend crash na ho
+// - existing backend normal tarike se chale
+// - tracker.js baad me safely add kiya ja sake
+//
+// Tracker existing ride/filter/credit/payment logic ko change nahi karta.
+// ============================================================
+
+let driverTracker = null;
+
+try {
+    driverTracker = require('./tracker');
+
+    console.log(
+        'DRIVER TRACKER: module loaded.'
+    );
+} catch (error) {
+    console.log(
+        'DRIVER TRACKER: not installed yet. Backend running normally.'
+    );
+}
+
+app.use(cors());
+app.use(express.json());
+
+// ============================================================
 // CONFIG
 // ============================================================
 
@@ -26,42 +58,6 @@ const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
 // APP UPDATE CONFIG
-// ============================================================
-//
-// These values are controlled from Vercel Environment Variables.
-//
-// APP_LATEST_VERSION
-//     Latest Android app version available to drivers.
-//     Example: 1.0.1
-//
-// APP_MINIMUM_VERSION
-//     Oldest Android version allowed to continue.
-//     Example: 1.0.0
-//
-// APP_APK_URL
-//     Public HTTPS URL of the latest APK.
-//
-// APP_UPDATE_TITLE
-//     Title shown by the Android update dialog.
-//
-// APP_UPDATE_MESSAGE
-//     Short update message.
-//
-// APP_RELEASE_NOTES
-//     Release notes shown to the driver.
-//
-// APP_PUBLISHED_AT
-//     Optional ISO timestamp for this release.
-//
-// IMPORTANT:
-// - If currentVersion < APP_LATEST_VERSION and APP_APK_URL is valid HTTPS,
-//   updateAvailable becomes true.
-// - If currentVersion < APP_MINIMUM_VERSION,
-//   forceUpdate becomes true.
-// - If currentVersion == APP_LATEST_VERSION,
-//   updateAvailable becomes false.
-// - APK URL must be HTTPS before the update button is enabled.
-// - This endpoint is public so the app can check before login.
 // ============================================================
 
 const APP_LATEST_VERSION =
@@ -110,6 +106,7 @@ const INSTALL_ID_MAX_LENGTH = 200;
 const RIDE_EVENT_ID_MAX_LENGTH = 200;
 
 const REFERRAL_CODE_LENGTH = 8;
+
 const REFERRAL_CODE_ALPHABET =
     'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -897,6 +894,43 @@ async function verifyFirebaseToken(
         req.driverUser =
             userData;
 
+        // ====================================================
+        // DRIVER ACTIVITY TRACKER
+        // ====================================================
+        //
+        // Tracker errors are intentionally ignored so tracking
+        // can NEVER block normal driver API requests.
+        //
+        // This does not change ride/filter/credit/payment logic.
+        // ====================================================
+
+        if (
+            driverTracker &&
+            typeof driverTracker.recordDriverActivity ===
+                'function'
+        ) {
+            try {
+                await driverTracker.recordDriverActivity({
+                    phone:
+                        req.firebaseUser.phone,
+
+                    uid:
+                        req.firebaseUser.uid,
+
+                    method:
+                        req.method,
+
+                    endpoint:
+                        req.originalUrl
+                });
+            } catch (trackerError) {
+                console.error(
+                    'DRIVER ACTIVITY TRACKER ERROR:',
+                    trackerError
+                );
+            }
+        }
+
         next();
     } catch (error) {
         console.error(
@@ -1245,38 +1279,11 @@ app.get(
 // ============================================================
 // APP UPDATE STATUS
 // ============================================================
-//
-// Public endpoint.
-// Android app can call this on startup and/or when dashboard opens.
-//
-// Example:
-//   GET /api/app/update?currentVersion=1.0.0
-//
-// Response example:
-// {
-//   success: true,
-//   currentVersion: "1.0.0",
-//   latestVersion: "1.0.1",
-//   minimumVersion: "1.0.0",
-//   updateAvailable: true,
-//   forceUpdate: false,
-//   apkUrl: "https://example.com/driver-ride-picker-1.0.1.apk",
-//   title: "New Update Available",
-//   message: "...",
-//   releaseNotes: "...",
-//   publishedAt: "..."
-// }
-//
-// IMPORTANT:
-// No Firebase login is required for this endpoint.
-// This allows an old app version to discover that an update exists.
-// ============================================================
 
 app.get(
     '/api/app/update',
     (req, res) => {
         try {
-            // Never let an intermediary cache update state.
             res.set(
                 'Cache-Control',
                 'no-store, no-cache, must-revalidate, proxy-revalidate'
@@ -1376,25 +1383,16 @@ app.get(
                         APP_MINIMUM_VERSION
                     );
 
-                /*
-                 * Update becomes available only when:
-                 *
-                 *   current < latest
-                 *   AND
-                 *   a valid HTTPS APK URL exists.
-                 */
                 updateAvailable =
                     currentVsLatest !== null &&
                     currentVsLatest < 0 &&
                     hasValidApkUrl;
 
-                /*
-                 * Mandatory update is controlled independently
-                 * by minimum version.
-                 */
+                // Mandatory update only when a usable APK URL exists.
                 forceUpdate =
                     currentVsMinimum !== null &&
-                    currentVsMinimum < 0;
+                    currentVsMinimum < 0 &&
+                    hasValidApkUrl;
             }
 
             return res.json({
@@ -1447,6 +1445,61 @@ app.get(
 
                 message:
                     'Unable to check app update status.'
+            });
+        }
+    }
+);
+
+// ============================================================
+// PRIVATE DRIVER TRACKER ADMIN ENDPOINT
+// ============================================================
+//
+// This endpoint is intentionally unavailable until tracker.js
+// is installed.
+//
+// Later:
+// GET /api/admin/tracker
+//
+// Header:
+// x-tracker-admin-key: <TRACKER_ADMIN_KEY>
+//
+// The tracker module itself will verify the admin key.
+// ============================================================
+
+app.get(
+    '/api/admin/tracker',
+    async (req, res) => {
+        if (
+            !driverTracker ||
+            typeof driverTracker.handleTrackerAdmin !==
+                'function'
+        ) {
+            return res.status(404).json({
+                success:
+                    false,
+
+                message:
+                    'Driver activity tracker is not installed yet.'
+            });
+        }
+
+        try {
+            return await driverTracker.handleTrackerAdmin(
+                req,
+                res
+            );
+        } catch (error) {
+            console.error(
+                'TRACKER ADMIN ERROR:',
+                error
+            );
+
+            return res.status(500).json({
+                success:
+                    false,
+
+                message:
+                    'Unable to load driver activity tracker.'
             });
         }
     }
@@ -2486,30 +2539,6 @@ app.get(
 // SERVER-SIDE EXACTLY-ONCE
 // ============================================================
 
-/*
- * RULES:
- *
- * Match/filter/scoring      = 0 credit
- * Accept/Confirm/Match      = 0 credit
- * Successful ride signal    = 1 credit
- * Same ride, repeated       = 0 extra credit
- * Same rideEventId retry    = 0 extra credit
- * New ride                  = new rideEventId
- *
- * The client MUST send the same rideEventId when retrying the
- * same successful ride.
- *
- * Firestore transaction:
- *
- *   First request:
- *       create rideCreditEvents record
- *       deduct 1 credit
- *
- *   Same request again:
- *       existing event found
- *       do NOT deduct again
- */
-
 app.post(
     '/api/ride/deduct-credit',
     verifyFirebaseToken,
@@ -2540,16 +2569,6 @@ app.post(
                     req.body.rideEventId
                 );
 
-            /*
-             * No automatic ID is generated here.
-             *
-             * Reason:
-             * If the network request succeeds but the response is lost,
-             * the client must retry with the SAME rideEventId.
-             *
-             * Generating a new ID on the server would make that retry
-             * look like a new ride and could deduct twice.
-             */
             if (
                 !rideEventId
             ) {
@@ -2607,19 +2626,11 @@ app.post(
 
             await db.runTransaction(
                 async transaction => {
-                    /*
-                     * Read the idempotency record first.
-                     */
                     const rideEventSnapshot =
                         await transaction.get(
                             rideEventRef
                         );
 
-                    /*
-                     * Always read the current user balance as well.
-                     * This keeps the duplicate response's balance current,
-                     * even if the driver later recharged or used credits.
-                     */
                     const userSnapshot =
                         await transaction.get(
                             userRef
@@ -2656,12 +2667,6 @@ app.post(
                         alreadyProcessed =
                             true;
 
-                        /*
-                         * IMPORTANT:
-                         * No user update.
-                         * No new event creation.
-                         * No credit deduction.
-                         */
                         return;
                     }
 
@@ -2713,14 +2718,6 @@ app.post(
                             0
                         ) + 1;
 
-                    /*
-                     * Create the idempotency record AND update the
-                     * user in the SAME Firestore transaction.
-                     *
-                     * If two identical requests arrive at the same time,
-                     * Firestore transaction retry/conflict handling will
-                     * allow only one successful deduction for this event.
-                     */
                     transaction.set(
                         rideEventRef,
                         {
@@ -2770,10 +2767,6 @@ app.post(
                 }
             );
 
-            /*
-             * Duplicate/retry:
-             * same event already processed, so 0 additional credit.
-             */
             if (
                 alreadyProcessed
             ) {
@@ -2795,10 +2788,6 @@ app.post(
                 });
             }
 
-            /*
-             * First successful processing:
-             * exactly 1 credit deducted.
-             */
             return res.json({
                 success:
                     true,
