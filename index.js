@@ -222,6 +222,43 @@ const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 // ============================================================
+// RIDE BOT CONFIG VERSION (REDIS-BACKED)
+// ============================================================
+//
+// Version is stored in Redis so admin can bump it without
+// redeploying the whole backend. When version increases,
+// the Android app's Accessibility service detects it and
+// triggers the 20-minute "update in progress" timer UI.
+//
+// - Default fallback: env RIDE_BOT_CONFIG_VERSION or 3
+// - Redis key: ride-bot-config-version
+//
+const RIDE_BOT_CONFIG_VERSION_FALLBACK = Number(process.env.RIDE_BOT_CONFIG_VERSION || 3);
+const RIDE_BOT_CONFIG_VERSION_KEY = 'ride-bot-config-version';
+
+async function getRideBotConfigVersion() {
+    try {
+        const fromRedis = await redis.get(RIDE_BOT_CONFIG_VERSION_KEY);
+        const parsed = Number(fromRedis);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return parsed;
+        }
+    } catch (error) {
+        console.error('CONFIG VERSION REDIS READ ERROR:', error);
+    }
+    return RIDE_BOT_CONFIG_VERSION_FALLBACK;
+}
+
+function verifyAdminToken(req) {
+    const expectedToken = String(process.env.ADMIN_TOKEN || '');
+    const authHeader = String(req.headers.authorization || '');
+    if (!expectedToken || !authHeader) {
+        return false;
+    }
+    return authHeader === `Bearer ${expectedToken}`;
+}
+
+// ============================================================
 // FIREBASE INIT
 // ============================================================
 
@@ -702,146 +739,238 @@ app.get('/api/app/update', (req, res) => {
 });
 
 // ============================================================
-// RIDE BOT CONFIG API
+// RIDE BOT CONFIG API (REDIS-BACKED VERSION)
 // ============================================================
 
-app.get('/api/config/ride-bot', (req, res) => {
-    res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=120');
+app.get('/api/config/ride-bot', async (req, res) => {
+    // 30s CDN cache, 60s stale-while-revalidate — matches Android
+    // 15-min poll cycle so we get fresh config well within the window.
+    res.setHeader('Cache-Control', 's-maxage=30, stale-while-revalidate=60');
     res.setHeader('Access-Control-Allow-Origin', '*');
 
-    res.status(200).json({
-        version: 2,
-        updatedAt: new Date().toISOString(),
-        platforms: {
-            Uber: {
-                accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"],
-                success_signals: [
-                    "start ride",
-                    "go to pickup",
-                    "going to pickup",
-                    "picking up",
-                    "pick up location",
-                    "navigate",
-                    "pickup",
-                    "confirm otp",
-                    "enter otp",
-                    "verify otp",
-                    "otp",
-                    "arrived",
-                    "reached",
-                    "waiting",
-                    "trip started",
-                    "start trip",
-                    "rider details",
-                    "customer details",
-                    "driver details",
-                    "you have accepted",
-                    "ride accepted",
-                    "accepted the ride",
-                    "you're on your way",
-                    "on the way"
-                ],
-                view_id_patterns: ["accept", "match", "confirm"]
+    try {
+        const version = await getRideBotConfigVersion();
+
+        res.status(200).json({
+            version: version,
+            updatedAt: new Date().toISOString(),
+            platforms: {
+                Uber: {
+                    accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"],
+                    success_signals: [
+                        "start ride",
+                        "go to pickup",
+                        "going to pickup",
+                        "picking up",
+                        "pick up location",
+                        "navigate",
+                        "pickup",
+                        "confirm otp",
+                        "enter otp",
+                        "verify otp",
+                        "otp",
+                        "arrived",
+                        "reached",
+                        "waiting",
+                        "trip started",
+                        "start trip",
+                        "rider details",
+                        "customer details",
+                        "driver details",
+                        "you have accepted",
+                        "ride accepted",
+                        "accepted the ride",
+                        "you're on your way",
+                        "on the way"
+                    ],
+                    view_id_patterns: ["accept", "match", "confirm"]
+                },
+                Ola: {
+                    accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"],
+                    success_signals: [
+                        "start ride",
+                        "go to pickup",
+                        "going to pickup",
+                        "picking up",
+                        "pick up location",
+                        "otp submit",
+                        "navigate",
+                        "pickup",
+                        "confirm otp",
+                        "enter otp",
+                        "verify otp",
+                        "otp",
+                        "arrived",
+                        "reached",
+                        "waiting",
+                        "trip started",
+                        "start trip",
+                        "rider details",
+                        "customer details",
+                        "driver details",
+                        "you have accepted",
+                        "ride accepted",
+                        "accepted the ride",
+                        "you're on your way",
+                        "on the way"
+                    ],
+                    view_id_patterns: ["accept", "confirm"]
+                },
+                Rapido: {
+                    accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"],
+                    success_signals: [
+                        "start ride",
+                        "go to pickup",
+                        "going to pickup",
+                        "picking up",
+                        "pick up location",
+                        "client located",
+                        "navigate",
+                        "pickup",
+                        "confirm otp",
+                        "enter otp",
+                        "verify otp",
+                        "otp",
+                        "arrived",
+                        "reached",
+                        "waiting",
+                        "trip started",
+                        "start trip",
+                        "rider details",
+                        "customer details",
+                        "driver details",
+                        "you have accepted",
+                        "ride accepted",
+                        "accepted the ride",
+                        "you're on your way",
+                        "on the way"
+                    ],
+                    view_id_patterns: ["accept", "order"]
+                },
+                "Namma Yatri": {
+                    accept_keywords: ["Confirm", "Accept", "Accept Ride"],
+                    success_signals: [
+                        "start ride",
+                        "go to pickup",
+                        "going to pickup",
+                        "picking up",
+                        "pick up location",
+                        "navigate",
+                        "pickup",
+                        "confirm otp",
+                        "enter otp",
+                        "verify otp",
+                        "otp",
+                        "arrived",
+                        "reached",
+                        "waiting",
+                        "trip started",
+                        "start trip",
+                        "rider details",
+                        "customer details",
+                        "driver details",
+                        "you have accepted",
+                        "ride accepted",
+                        "accepted the ride",
+                        "you're on your way",
+                        "on the way"
+                    ],
+                    view_id_patterns: ["accept", "confirm"]
+                }
             },
-            Ola: {
-                accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"],
-                success_signals: [
-                    "start ride",
-                    "go to pickup",
-                    "going to pickup",
-                    "picking up",
-                    "pick up location",
-                    "otp submit",
-                    "navigate",
-                    "pickup",
-                    "confirm otp",
-                    "enter otp",
-                    "verify otp",
-                    "otp",
-                    "arrived",
-                    "reached",
-                    "waiting",
-                    "trip started",
-                    "start trip",
-                    "rider details",
-                    "customer details",
-                    "driver details",
-                    "you have accepted",
-                    "ride accepted",
-                    "accepted the ride",
-                    "you're on your way",
-                    "on the way"
-                ],
-                view_id_patterns: ["accept", "confirm"]
-            },
-            Rapido: {
-                accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"],
-                success_signals: [
-                    "start ride",
-                    "go to pickup",
-                    "going to pickup",
-                    "picking up",
-                    "pick up location",
-                    "client located",
-                    "navigate",
-                    "pickup",
-                    "confirm otp",
-                    "enter otp",
-                    "verify otp",
-                    "otp",
-                    "arrived",
-                    "reached",
-                    "waiting",
-                    "trip started",
-                    "start trip",
-                    "rider details",
-                    "customer details",
-                    "driver details",
-                    "you have accepted",
-                    "ride accepted",
-                    "accepted the ride",
-                    "you're on your way",
-                    "on the way"
-                ],
-                view_id_patterns: ["accept", "order"]
-            },
-            "Namma Yatri": {
-                accept_keywords: ["Confirm", "Accept", "Accept Ride"],
-                success_signals: [
-                    "start ride",
-                    "go to pickup",
-                    "going to pickup",
-                    "picking up",
-                    "pick up location",
-                    "navigate",
-                    "pickup",
-                    "confirm otp",
-                    "enter otp",
-                    "verify otp",
-                    "otp",
-                    "arrived",
-                    "reached",
-                    "waiting",
-                    "trip started",
-                    "start trip",
-                    "rider details",
-                    "customer details",
-                    "driver details",
-                    "you have accepted",
-                    "ride accepted",
-                    "accepted the ride",
-                    "you're on your way",
-                    "on the way"
-                ],
-                view_id_patterns: ["accept", "confirm"]
+            global: {
+                max_ride_cycle_duration_ms: 8000,
+                watchdog_interval_ms: 2000,
+                health_check_interval_ms: 300000
             }
-        },
-        global: {
-            max_ride_cycle_duration_ms: 8000,
-            watchdog_interval_ms: 2000,
-            health_check_interval_ms: 300000
+        });
+    } catch (error) {
+        console.error('RIDE BOT CONFIG ERROR:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to load ride bot config.'
+        });
+    }
+});
+
+// ============================================================
+// ADMIN: RIDE BOT CONFIG VERSION CONTROL
+// ============================================================
+//
+// Usage:
+//   GET  /api/admin/config/version   → current version
+//   POST /api/admin/config/bump      → version = version + 1 (triggers Android update timer)
+//   POST /api/admin/config/set       → { version: N } set explicit version
+//
+// Auth: Authorization: Bearer <ADMIN_TOKEN>
+//
+app.get('/api/admin/config/version', async (req, res) => {
+    if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    }
+    try {
+        const version = await getRideBotConfigVersion();
+        return res.json({
+            success: true,
+            version: version,
+            source: 'redis-or-env-fallback'
+        });
+    } catch (error) {
+        console.error('ADMIN CONFIG VERSION ERROR:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to read config version.'
+        });
+    }
+});
+
+app.post('/api/admin/config/bump', async (req, res) => {
+    if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    }
+    try {
+        const current = await getRideBotConfigVersion();
+        const next = current + 1;
+        await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(next));
+        return res.json({
+            success: true,
+            previousVersion: current,
+            newVersion: next,
+            message: `Config version bumped to ${next}. Android clients will pick this up within ~15 min and show the update timer.`
+        });
+    } catch (error) {
+        console.error('ADMIN CONFIG BUMP ERROR:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to bump config version.'
+        });
+    }
+});
+
+app.post('/api/admin/config/set', async (req, res) => {
+    if (!verifyAdminToken(req)) {
+        return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    }
+    try {
+        const requested = Number(req.body.version);
+        if (!Number.isFinite(requested) || requested <= 0 || !Number.isInteger(requested)) {
+            return res.status(400).json({
+                success: false,
+                message: 'version must be a positive integer.'
+            });
         }
-    });
+        await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(requested));
+        return res.json({
+            success: true,
+            newVersion: requested
+        });
+    } catch (error) {
+        console.error('ADMIN CONFIG SET ERROR:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to set config version.'
+        });
+    }
 });
 
 // ============================================================
@@ -880,10 +1009,7 @@ app.post('/api/health/report', async (req, res) => {
 // ============================================================
 
 app.get('/api/admin/dashboard', async (req, res) => {
-    const authHeader = req.headers.authorization;
-    const expectedToken = process.env.ADMIN_TOKEN;
-
-    if (!expectedToken || authHeader !== `Bearer ${expectedToken}`) {
+    if (!verifyAdminToken(req)) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
@@ -1254,6 +1380,20 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
 
         const firebaseCustomToken = await admin.auth().createCustomToken(driverFirebaseUid, { driver: true });
 
+        // Compute referral count for response consistency
+        let referralCount = 0;
+        try {
+            const referralCountSnapshot = await db
+                .collection('referralRewards')
+                .where('referrerPhone', '==', phone)
+                .where('status', '==', 'rewarded')
+                .count()
+                .get();
+            referralCount = Number(referralCountSnapshot.data().count || 0);
+        } catch (_) {
+            referralCount = 0;
+        }
+
         return res.json({
             success: true,
             isNewUser: isNewUser,
@@ -1273,7 +1413,8 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 firebaseUid: driverFirebaseUid,
                 credits: Number(userData.credits || 0),
                 totalRides: Number(userData.totalRides || 0),
-                referralCode: userData.referralCode || ''
+                referralCode: userData.referralCode || '',
+                referralCount: referralCount
             }
         });
     } catch (error) {
@@ -1311,18 +1452,95 @@ app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
 
         const data = snapshot.data() || {};
 
+        // Compute live referral count from referralRewards collection
+        let referralCount = 0;
+        try {
+            const referralCountSnapshot = await getDB()
+                .collection('referralRewards')
+                .where('referrerPhone', '==', phone)
+                .where('status', '==', 'rewarded')
+                .count()
+                .get();
+            referralCount = Number(referralCountSnapshot.data().count || 0);
+        } catch (_) {
+            referralCount = Number(data.referralCount || 0);
+        }
+
         return res.json({
             success: true,
             credits: Number(data.credits || 0),
             totalRides: Number(data.totalRides || 0),
             referralCode: data.referralCode || '',
-            referralCount: Number(data.referralCount || 0)
+            referralCount: referralCount
         });
     } catch (error) {
         console.error('BALANCE ERROR:', error);
         return res.status(500).json({
             success: false,
             message: 'Unable to load balance.'
+        });
+    }
+});
+
+// ============================================================
+// REFERRAL DETAILS (used by MainActivity ReferralScreen)
+// ============================================================
+
+app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
+    try {
+        const phone = getAuthenticatedPhone(req);
+
+        if (!phone) {
+            return res.status(401).json({
+                success: false,
+                message: 'Authenticated driver required.'
+            });
+        }
+
+        const db = getDB();
+        const userSnapshot = await db.collection('users').doc(phone).get();
+
+        if (!userSnapshot.exists) {
+            return res.status(404).json({
+                success: false,
+                message: 'Driver account not found.'
+            });
+        }
+
+        const userData = userSnapshot.data() || {};
+        const referralCode = String(userData.referralCode || '').trim();
+
+        let successfulReferrals = 0;
+        let creditsEarned = 0;
+
+        try {
+            const rewardedSnapshot = await db
+                .collection('referralRewards')
+                .where('referrerPhone', '==', phone)
+                .where('status', '==', 'rewarded')
+                .get();
+
+            successfulReferrals = rewardedSnapshot.size;
+            creditsEarned = successfulReferrals * REFERRAL_BONUS_CREDITS;
+        } catch (referralError) {
+            console.error('REFERRAL COUNT ERROR:', referralError);
+            successfulReferrals = Number(userData.referralCount || 0);
+            creditsEarned = successfulReferrals * REFERRAL_BONUS_CREDITS;
+        }
+
+        return res.json({
+            success: true,
+            referralCode: referralCode,
+            successfulReferrals: successfulReferrals,
+            creditsEarned: creditsEarned,
+            bonusPerReferral: REFERRAL_BONUS_CREDITS,
+            message: 'Referral details loaded.'
+        });
+    } catch (error) {
+        console.error('REFERRAL DETAILS ERROR:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to load referral details.'
         });
     }
 });
