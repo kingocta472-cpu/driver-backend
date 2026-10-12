@@ -206,12 +206,41 @@ const REFERRAL_BONUS_RIDES = 5;          // Referral par +5 free rides
 const DAILY_PLAN_AMOUNT = 15;            // ₹15 Daily
 const DAILY_PLAN_DURATION_MS = 24 * 60 * 60 * 1000;   // 24 hours
 
+const THREE_DAYS_PLAN_AMOUNT = 39;       // ₹39 3 Days
+const THREE_DAYS_PLAN_DURATION_MS = 3 * 24 * 60 * 60 * 1000;   // 3 days
+
+const WEEKLY_PLAN_AMOUNT = 99;           // ₹99 Weekly
+const WEEKLY_PLAN_DURATION_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days
+
+const FIFTEEN_DAYS_PLAN_AMOUNT = 175;    // ₹175 15 Days
+const FIFTEEN_DAYS_PLAN_DURATION_MS = 15 * 24 * 60 * 60 * 1000;   // 15 days
+
 const MONTHLY_PLAN_AMOUNT = 299;         // ₹299 Monthly
 const MONTHLY_PLAN_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 const PLAN_TYPE_DAILY = 'DAILY';
+const PLAN_TYPE_THREE_DAYS = 'THREE_DAYS';
+const PLAN_TYPE_WEEKLY = 'WEEKLY';
+const PLAN_TYPE_FIFTEEN_DAYS = 'FIFTEEN_DAYS';
 const PLAN_TYPE_MONTHLY = 'MONTHLY';
 const PLAN_TYPE_NONE = 'NONE';
+
+// ==== PLAN LOOKUP TABLE (amount → plan config) ====
+const PLAN_CONFIG_BY_AMOUNT = {
+    [DAILY_PLAN_AMOUNT]: { type: PLAN_TYPE_DAILY, durationMs: DAILY_PLAN_DURATION_MS, label: 'Daily' },
+    [THREE_DAYS_PLAN_AMOUNT]: { type: PLAN_TYPE_THREE_DAYS, durationMs: THREE_DAYS_PLAN_DURATION_MS, label: '3 Days' },
+    [WEEKLY_PLAN_AMOUNT]: { type: PLAN_TYPE_WEEKLY, durationMs: WEEKLY_PLAN_DURATION_MS, label: 'Weekly' },
+    [FIFTEEN_DAYS_PLAN_AMOUNT]: { type: PLAN_TYPE_FIFTEEN_DAYS, durationMs: FIFTEEN_DAYS_PLAN_DURATION_MS, label: '15 Days' },
+    [MONTHLY_PLAN_AMOUNT]: { type: PLAN_TYPE_MONTHLY, durationMs: MONTHLY_PLAN_DURATION_MS, label: 'Monthly' }
+};
+
+const VALID_PLAN_TYPES = [
+    PLAN_TYPE_DAILY,
+    PLAN_TYPE_THREE_DAYS,
+    PLAN_TYPE_WEEKLY,
+    PLAN_TYPE_FIFTEEN_DAYS,
+    PLAN_TYPE_MONTHLY
+];
 
 // Backward compatibility (purane users ke liye, migrate honge)
 const FREE_START_CREDITS = 10;
@@ -1606,21 +1635,18 @@ app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
             return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
         }
 
-        // === Only ₹15 (Daily) or ₹299 (Monthly) allowed ===
-        let planType;
-        let planDurationMs;
-        if (amountRupees === DAILY_PLAN_AMOUNT) {
-            planType = PLAN_TYPE_DAILY;
-            planDurationMs = DAILY_PLAN_DURATION_MS;
-        } else if (amountRupees === MONTHLY_PLAN_AMOUNT) {
-            planType = PLAN_TYPE_MONTHLY;
-            planDurationMs = MONTHLY_PLAN_DURATION_MS;
-        } else {
+        // === Allowed plans: ₹15 (Daily), ₹39 (3 Days), ₹99 (Weekly), ₹175 (15 Days), ₹299 (Monthly) ===
+        const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
+
+        if (!planConfig) {
             return res.status(400).json({
                 success: false,
-                message: `Only ₹${DAILY_PLAN_AMOUNT} (Daily) or ₹${MONTHLY_PLAN_AMOUNT} (Monthly) plans are available.`
+                message: `Only ₹${DAILY_PLAN_AMOUNT} (Daily), ₹${THREE_DAYS_PLAN_AMOUNT} (3 Days), ₹${WEEKLY_PLAN_AMOUNT} (Weekly), ₹${FIFTEEN_DAYS_PLAN_AMOUNT} (15 Days) or ₹${MONTHLY_PLAN_AMOUNT} (Monthly) plans are available.`
             });
         }
+
+        const planType = planConfig.type;
+        const planDurationMs = planConfig.durationMs;
 
         const receipt = generateReceipt();
         const razorpay = getRazorpay();
@@ -1734,7 +1760,7 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
         const planType = String(orderData.planType || '').toUpperCase();
         const planDurationMs = Number(orderData.planDurationMs || 0);
 
-        if (planType !== PLAN_TYPE_DAILY && planType !== PLAN_TYPE_MONTHLY) {
+        if (!VALID_PLAN_TYPES.includes(planType)) {
             return res.status(400).json({ success: false, message: 'Invalid plan type in order.' });
         }
         if (planDurationMs <= 0) {
