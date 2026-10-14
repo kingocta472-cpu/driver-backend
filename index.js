@@ -253,9 +253,15 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.0.0').trim();
-const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || APP_LATEST_VERSION).trim();
-const APP_APK_URL = String(process.env.APP_APK_URL || '').trim();
+// ============================================================
+// APP UPDATE CONFIGURATION
+// NOTE: Default values are set here for the case where Vercel
+// environment variables are missing. Override via env vars if
+// you want to change the version without redeploying code.
+// ============================================================
+const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.7.0').trim();
+const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.6.0').trim();
+const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.7.0/app-release.apk').trim();
 const APP_UPDATE_TITLE = String(process.env.APP_UPDATE_TITLE || 'New Update Available').trim();
 const APP_UPDATE_MESSAGE = String(process.env.APP_UPDATE_MESSAGE || 'A new Driver Ride Picker update is available.').trim();
 const APP_RELEASE_NOTES = String(process.env.APP_RELEASE_NOTES || 'Performance improvements and bug fixes.').trim();
