@@ -200,7 +200,7 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 
 // ==== NEW PLAN CONSTANTS ====
-const FREE_START_RIDES = 10;             // Naye user ko 10 free rides
+const FREE_START_RIDES = 1;              // ✅ CHANGED: Naye user ko sirf 1 free test ride
 const REFERRAL_BONUS_RIDES = 5;          // Referral par +5 free rides
 
 const DAILY_PLAN_AMOUNT = 15;            // ₹15 Daily
@@ -1387,7 +1387,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
         let welcomeMessage;
         if (isNewUser) {
             welcomeMessage = trialRidesAdded > 0
-                ? `Welcome! ${trialRidesAdded} free rides added.`
+                ? `Welcome! ${trialRidesAdded} free ride added.`
                 : 'Account created. This installation has already used the free trial.';
         } else {
             welcomeMessage = pinWasCreated
