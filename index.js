@@ -200,23 +200,23 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 
 // ==== NEW PLAN CONSTANTS ====
-const FREE_START_RIDES = 10;             // ✅ Naye user ko 10 free rides
+const FREE_START_RIDES = 10;             // Naye user ko 10 free rides
 const REFERRAL_BONUS_RIDES = 5;          // Referral par +5 free rides
 
-const DAILY_PLAN_AMOUNT = 15;            // ₹15 Daily
-const DAILY_PLAN_DURATION_MS = 24 * 60 * 60 * 1000;   // 24 hours
+const DAILY_PLAN_AMOUNT = 15;
+const DAILY_PLAN_DURATION_MS = 24 * 60 * 60 * 1000;
 
-const THREE_DAYS_PLAN_AMOUNT = 39;       // ₹39 3 Days
-const THREE_DAYS_PLAN_DURATION_MS = 3 * 24 * 60 * 60 * 1000;   // 3 days
+const THREE_DAYS_PLAN_AMOUNT = 39;
+const THREE_DAYS_PLAN_DURATION_MS = 3 * 24 * 60 * 60 * 1000;
 
-const WEEKLY_PLAN_AMOUNT = 99;           // ₹99 Weekly
-const WEEKLY_PLAN_DURATION_MS = 7 * 24 * 60 * 60 * 1000;   // 7 days
+const WEEKLY_PLAN_AMOUNT = 99;
+const WEEKLY_PLAN_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 
-const FIFTEEN_DAYS_PLAN_AMOUNT = 175;    // ₹175 15 Days
-const FIFTEEN_DAYS_PLAN_DURATION_MS = 15 * 24 * 60 * 60 * 1000;   // 15 days
+const FIFTEEN_DAYS_PLAN_AMOUNT = 175;
+const FIFTEEN_DAYS_PLAN_DURATION_MS = 15 * 24 * 60 * 60 * 1000;
 
-const MONTHLY_PLAN_AMOUNT = 299;         // ₹299 Monthly
-const MONTHLY_PLAN_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const MONTHLY_PLAN_AMOUNT = 299;
+const MONTHLY_PLAN_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const PLAN_TYPE_DAILY = 'DAILY';
 const PLAN_TYPE_THREE_DAYS = 'THREE_DAYS';
@@ -225,7 +225,6 @@ const PLAN_TYPE_FIFTEEN_DAYS = 'FIFTEEN_DAYS';
 const PLAN_TYPE_MONTHLY = 'MONTHLY';
 const PLAN_TYPE_NONE = 'NONE';
 
-// ==== PLAN LOOKUP TABLE (amount → plan config) ====
 const PLAN_CONFIG_BY_AMOUNT = {
     [DAILY_PLAN_AMOUNT]: { type: PLAN_TYPE_DAILY, durationMs: DAILY_PLAN_DURATION_MS, label: 'Daily' },
     [THREE_DAYS_PLAN_AMOUNT]: { type: PLAN_TYPE_THREE_DAYS, durationMs: THREE_DAYS_PLAN_DURATION_MS, label: '3 Days' },
@@ -242,7 +241,6 @@ const VALID_PLAN_TYPES = [
     PLAN_TYPE_MONTHLY
 ];
 
-// Backward compatibility (purane users ke liye, migrate honge)
 const FREE_START_CREDITS = 10;
 const REFERRAL_BONUS_CREDITS = 5;
 const MIN_RECHARGE_RUPEES = 10;
@@ -254,14 +252,14 @@ const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
-// APP UPDATE CONFIGURATION
+// APP UPDATE CONFIGURATION  (v1.8.0)
 // ============================================================
-const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.2').trim();
+const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.8.0').trim();
 const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.0.0').trim();
-const APP_APK_URL = String(process.env.APP_APK_URL || '').trim();
+const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.8.0/app-release.apk').trim();
 const APP_UPDATE_TITLE = String(process.env.APP_UPDATE_TITLE || 'New Update Available').trim();
-const APP_UPDATE_MESSAGE = String(process.env.APP_UPDATE_MESSAGE || 'A new Driver Ride Picker update is available.').trim();
-const APP_RELEASE_NOTES = String(process.env.APP_RELEASE_NOTES || 'Performance improvements and bug fixes.').trim();
+const APP_UPDATE_MESSAGE = String(process.env.APP_UPDATE_MESSAGE || 'New features and improvements are ready!').trim();
+const APP_RELEASE_NOTES = String(process.env.APP_RELEASE_NOTES || 'Smart Ride Detection, Minimum Fare Filter, Pickup Distance Filter, Trip Distance Filter, Target & Blocked Areas, Auto Car & Bike Selection, Keyword & Blocked Keyword Filters, Easy-to-Use Interface').trim();
 const APP_PUBLISHED_AT = String(process.env.APP_PUBLISHED_AT || '').trim();
 
 const INSTALL_ID_MAX_LENGTH = 200;
@@ -272,17 +270,16 @@ const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // ============================================================
 // TRIAL SECURITY
 // ============================================================
-const TRIAL_IP_LIMIT = 999999;         // ✅ CGNAT ke wajah se high rakha
-const TRIAL_IP_WINDOW_SECONDS = 86400; // 24 hours
+const TRIAL_IP_LIMIT = 999999;
+const TRIAL_IP_WINDOW_SECONDS = 86400;
 
-// Fake phone number patterns (block obvious abuse)
 const FAKE_PHONE_PATTERNS = [
-    /^(\d)\1{9}$/,      // 0000000000, 1111111111, 9999999999
-    /^9999\d{6}$/,      // 9999xxxxxx
-    /^1234\d{6}$/,      // 1234xxxxxx
-    /^(\d{2})\1{4}$/,   // 1212121212, 8787878787
-    /^9876\d{6}$/,      // 9876xxxxxx
-    /^0000\d{6}$/,      // 0000xxxxxx
+    /^(\d)\1{9}$/,
+    /^9999\d{6}$/,
+    /^1234\d{6}$/,
+    /^(\d{2})\1{4}$/,
+    /^9876\d{6}$/,
+    /^0000\d{6}$/,
 ];
 
 function isFakePhone(phone) {
@@ -424,7 +421,6 @@ function isValidPin(pin) {
     return new RegExp(`^\\d{${PIN_LENGTH}}$`).test(String(pin || '').trim());
 }
 
-// ==== NEW: Plan helpers ====
 function getEffectiveFreeRides(userData) {
     if (!userData) return 0;
     if (typeof userData.freeRidesLeft === 'number') {
@@ -1072,7 +1068,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit Indian mobile number.' });
         }
 
-        // Block obviously fake phone numbers
         if (isFakePhone(phone)) {
             return res.status(400).json({
                 success: false,
@@ -1086,8 +1081,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
         if (!installId) {
             return res.status(400).json({ success: false, message: 'App installation identity required.' });
         }
-
-        // ✅ Device ID check hataya gaya — installId fallback already kaam kar raha hai
 
         const db = getDB();
         const lockState = await getPinLockState(db, phone);
@@ -1133,7 +1126,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 pinWasCreated = true;
             }
 
-            // ==== MIGRATION: purane credits ko freeRidesLeft me convert karo ====
             if (typeof userData.freeRidesLeft !== 'number' && typeof userData.credits === 'number') {
                 updates.freeRidesLeft = Number(userData.credits) || 0;
             }
@@ -1162,7 +1154,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             await userRef.update(updates);
             userData = { ...userData, ...updates };
         } else {
-            // === IP RATE LIMIT for trial abuse prevention ===
             try {
                 const clientIp = String(
                     req.headers['x-forwarded-for'] ||
@@ -1190,7 +1181,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 }
             } catch (ipError) {
                 console.error('IP RATE LIMIT ERROR (non-blocking):', ipError);
-                // Non-blocking — Redis fail hone pe login allow karo
             }
 
             isNewUser = true;
@@ -1393,7 +1383,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             success: true,
             isNewUser: isNewUser,
             trialRidesAdded: trialRidesAdded,
-            trialCreditsAdded: trialRidesAdded, // backward compat
+            trialCreditsAdded: trialRidesAdded,
             pinWasCreated: pinWasCreated,
             authMethod: 'pin',
             firebaseCustomToken: firebaseCustomToken,
@@ -1405,7 +1395,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 activePlan: activePlan,
                 planExpiry: planExpiry,
                 isUnlimited: isUnlimited,
-                credits: freeRidesLeft, // backward compat
+                credits: freeRidesLeft,
                 totalRides: Number(userData.totalRides || 0),
                 referralCode: userData.referralCode || '',
                 referralCount: referralCount
@@ -1462,7 +1452,7 @@ app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
             planExpiry: planExpiry,
             planExpiryIso: planExpiry > 0 ? new Date(planExpiry).toISOString() : null,
             isUnlimited: isUnlimited,
-            credits: freeRidesLeft, // backward compat
+            credits: freeRidesLeft,
             totalRides: Number(data.totalRides || 0),
             referralCode: data.referralCode || '',
             referralCount: referralCount
@@ -1518,7 +1508,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
             referralCode: referralCode,
             successfulReferrals: successfulReferrals,
             ridesEarned: ridesEarned,
-            creditsEarned: ridesEarned, // backward compat
+            creditsEarned: ridesEarned,
             bonusPerReferral: REFERRAL_BONUS_RIDES,
             message: 'Referral details loaded.'
         });
@@ -1573,7 +1563,6 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             const isUnlimited = planExpiry > Date.now();
             const currentFreeRides = getEffectiveFreeRides(userData);
 
-            // Duplicate ride event check
             if (rideEventSnapshot.exists) {
                 remainingFreeRides = currentFreeRides;
                 unlimitedActive = isUnlimited;
@@ -1582,7 +1571,6 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
                 return;
             }
 
-            // === CASE 1: Unlimited plan active ===
             if (isUnlimited) {
                 unlimitedActive = true;
                 activePlanType = String(userData.activePlan || PLAN_TYPE_NONE);
@@ -1608,7 +1596,6 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
                 return;
             }
 
-            // === CASE 2: Free rides available ===
             if (currentFreeRides > 0) {
                 remainingFreeRides = currentFreeRides - 1;
                 const totalRides = Number(userData.totalRides || 0) + 1;
@@ -1627,14 +1614,13 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
 
                 transaction.update(userRef, {
                     freeRidesLeft: remainingFreeRides,
-                    credits: remainingFreeRides, // backward compat
+                    credits: remainingFreeRides,
                     totalRides: totalRides,
                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
                 return;
             }
 
-            // === CASE 3: No free rides, no plan → reject ===
             const error = new Error('No active plan and no free rides left. Please recharge.');
             error.statusCode = 402;
             throw error;
@@ -1648,7 +1634,7 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
                 unlimited: unlimitedActive,
                 planType: activePlanType,
                 remainingFreeRides: remainingFreeRides,
-                remainingCredits: remainingFreeRides, // backward compat
+                remainingCredits: remainingFreeRides,
                 message: 'Ride already processed for this ride.'
             });
         }
