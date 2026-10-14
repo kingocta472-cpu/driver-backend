@@ -255,9 +255,6 @@ const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
 // APP UPDATE CONFIGURATION
-// NOTE: Default values are set here for the case where Vercel
-// environment variables are missing. Override via env vars if
-// you want to change the version without redeploying code.
 // ============================================================
 const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.2').trim();
 const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.0.0').trim();
@@ -271,6 +268,26 @@ const INSTALL_ID_MAX_LENGTH = 200;
 const RIDE_EVENT_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+// ============================================================
+// TRIAL SECURITY
+// ============================================================
+const TRIAL_IP_LIMIT = 3;              // Max 3 new accounts per IP per 24h
+const TRIAL_IP_WINDOW_SECONDS = 86400; // 24 hours
+
+// Fake phone number patterns (block obvious abuse)
+const FAKE_PHONE_PATTERNS = [
+    /^(\d)\1{9}$/,      // 0000000000, 1111111111, 9999999999
+    /^9999\d{6}$/,      // 9999xxxxxx
+    /^1234\d{6}$/,      // 1234xxxxxx
+    /^(\d{2})\1{4}$/,   // 1212121212, 8787878787
+    /^9876\d{6}$/,      // 9876xxxxxx
+    /^0000\d{6}$/,      // 0000xxxxxx
+];
+
+function isFakePhone(phone) {
+    return FAKE_PHONE_PATTERNS.some(p => p.test(phone));
+}
 
 // ============================================================
 // RIDE BOT CONFIG VERSION (REDIS-BACKED)
@@ -410,7 +427,6 @@ function isValidPin(pin) {
 // ==== NEW: Plan helpers ====
 function getEffectiveFreeRides(userData) {
     if (!userData) return 0;
-    // Migration: agar freeRidesLeft nahi hai lekin purane credits hain, to credits use karo
     if (typeof userData.freeRidesLeft === 'number') {
         return Number(userData.freeRidesLeft) || 0;
     }
@@ -1055,11 +1071,28 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
         if (!phone) {
             return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit Indian mobile number.' });
         }
+
+        // Block obviously fake phone numbers
+        if (isFakePhone(phone)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please enter a real mobile number.'
+            });
+        }
+
         if (!isValidPin(pin)) {
             return res.status(400).json({ success: false, message: 'PIN must be exactly 6 digits.' });
         }
         if (!installId) {
             return res.status(400).json({ success: false, message: 'App installation identity required.' });
+        }
+
+        // Device ID is mandatory for new account trial claims
+        if (!deviceId || deviceId.length < 10) {
+            return res.status(400).json({
+                success: false,
+                message: 'Device identity required. Please update the app.'
+            });
         }
 
         const db = getDB();
@@ -1135,6 +1168,37 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             await userRef.update(updates);
             userData = { ...userData, ...updates };
         } else {
+            // === IP RATE LIMIT for trial abuse prevention ===
+            try {
+                const clientIp = String(
+                    req.headers['x-forwarded-for'] ||
+                    req.headers['x-real-ip'] ||
+                    req.socket?.remoteAddress ||
+                    'unknown'
+                ).split(',')[0].trim();
+
+                if (clientIp && clientIp !== 'unknown' && clientIp !== '::1' && clientIp !== '127.0.0.1') {
+                    const ipKey = `trial:ip:${clientIp}`;
+                    const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
+
+                    if (currentCount >= TRIAL_IP_LIMIT) {
+                        console.warn(`IP RATE LIMIT HIT: ${clientIp} (count=${currentCount})`);
+                        return res.status(429).json({
+                            success: false,
+                            message: 'Too many new accounts from this network. Please try again tomorrow.'
+                        });
+                    }
+
+                    await redis.incr(ipKey);
+                    if (currentCount === 0) {
+                        await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
+                    }
+                }
+            } catch (ipError) {
+                console.error('IP RATE LIMIT ERROR (non-blocking):', ipError);
+                // Non-blocking — Redis fail hone pe login allow karo
+            }
+
             isNewUser = true;
             const newReferralCode = await createUniqueReferralCode(db, userRef);
             let referralApplied = false;
@@ -1641,7 +1705,6 @@ app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
             return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
         }
 
-        // === Allowed plans: ₹15 (Daily), ₹39 (3 Days), ₹99 (Weekly), ₹175 (15 Days), ₹299 (Monthly) ===
         const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
 
         if (!planConfig) {
