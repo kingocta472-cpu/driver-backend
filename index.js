@@ -200,7 +200,7 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 
 // ==== NEW PLAN CONSTANTS ====
-const FREE_START_RIDES = 1;              // ✅ CHANGED: Naye user ko sirf 1 free test ride
+const FREE_START_RIDES = 10;             // ✅ Naye user ko 10 free rides
 const REFERRAL_BONUS_RIDES = 5;          // Referral par +5 free rides
 
 const DAILY_PLAN_AMOUNT = 15;            // ₹15 Daily
@@ -272,7 +272,7 @@ const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // ============================================================
 // TRIAL SECURITY
 // ============================================================
-const TRIAL_IP_LIMIT = 3;              // Max 3 new accounts per IP per 24h
+const TRIAL_IP_LIMIT = 999999;         // ✅ CGNAT ke wajah se high rakha
 const TRIAL_IP_WINDOW_SECONDS = 86400; // 24 hours
 
 // Fake phone number patterns (block obvious abuse)
@@ -1387,7 +1387,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
         let welcomeMessage;
         if (isNewUser) {
             welcomeMessage = trialRidesAdded > 0
-                ? `Welcome! ${trialRidesAdded} free ride added.`
+                ? `Welcome! ${trialRidesAdded} free rides added.`
                 : 'Account created. This installation has already used the free trial.';
         } else {
             welcomeMessage = pinWasCreated
