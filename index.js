@@ -1087,13 +1087,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             return res.status(400).json({ success: false, message: 'App installation identity required.' });
         }
 
-        // Device ID is mandatory for new account trial claims
-        if (!deviceId || deviceId.length < 10) {
-            return res.status(400).json({
-                success: false,
-                message: 'Device identity required. Please update the app.'
-            });
-        }
+        // ✅ Device ID check hataya gaya — installId fallback already kaam kar raha hai
 
         const db = getDB();
         const lockState = await getPinLockState(db, phone);
