@@ -199,7 +199,6 @@ async function handleDriverTrackerAdmin(req, res) {
 // CONFIG
 // ============================================================
 
-// ==== NEW PLAN CONSTANTS ====
 const FREE_START_RIDES = 10;
 const REFERRAL_BONUS_RIDES = 5;
 
@@ -252,11 +251,11 @@ const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
-// APP UPDATE CONFIGURATION  (v1.7.0)
+// APP UPDATE CONFIGURATION  (v1.10.0)
 // ============================================================
-const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.7.0').trim();
-const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.7.0').trim();
-const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.7.0/app-release.apk').trim();
+const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.10.0').trim();
+const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.10.0').trim();
+const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.10.0/app-release.apk').trim();
 const APP_UPDATE_TITLE = String(process.env.APP_UPDATE_TITLE || 'New Update Available').trim();
 const APP_UPDATE_MESSAGE = String(process.env.APP_UPDATE_MESSAGE || 'New features and improvements are ready!').trim();
 const APP_RELEASE_NOTES = String(process.env.APP_RELEASE_NOTES || 'Smart Ride Detection, Minimum Fare Filter, Pickup Distance Filter, Trip Distance Filter, Target & Blocked Areas, Auto Car & Bike Selection, Keyword & Blocked Keyword Filters, Easy-to-Use Interface').trim();
