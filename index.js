@@ -1659,14 +1659,133 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             planType: PLAN_TYPE_NONE,
             remainingFreeRides: remainingFreeRides,
             remainingCredits: remainingFreeRides,
-            message: 'Free ride deducted.',
-            remainingCredits: remainingFreeRides
+            message: 'Free ride deducted.'
         });
     } catch (error) {
         console.error('DEDUCT RIDE ERROR:', error);
         return res.status(error.statusCode || 500).json({
             success: false,
             message: error.message || 'Unable to deduct ride.'
+        });
+    }
+});
+
+// ============================================================
+// ✅ NEW: REFUND RIDE (Auto-refund for aggressive cuts)
+// ============================================================
+
+app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
+    try {
+        const phone = normalizePhone(req.body.phone);
+        if (!phoneMatchesAuthenticatedUser(req, phone)) {
+            return res.status(403).json({ success: false, message: 'You can only use your own account.' });
+        }
+
+        const rideEventId = normalizeRideEventId(req.body.rideEventId);
+        const reason = String(req.body.reason || 'unknown').slice(0, 200);
+
+        if (!rideEventId) {
+            return res.status(400).json({ success: false, message: 'rideEventId is required for refund.' });
+        }
+
+        const db = getDB();
+        const userRef = db.collection('users').doc(phone);
+        const rideEventRef = db.collection('rideCreditEvents').doc(createRideEventDocumentId(phone, rideEventId));
+
+        let refundedAmount = 0;
+        let newFreeRides = 0;
+        let alreadyRefunded = false;
+
+        await db.runTransaction(async transaction => {
+            const rideEventSnapshot = await transaction.get(rideEventRef);
+            const userSnapshot = await transaction.get(userRef);
+
+            if (!userSnapshot.exists) {
+                const error = new Error('Driver account not found.');
+                error.statusCode = 404;
+                throw error;
+            }
+
+            if (!rideEventSnapshot.exists) {
+                const error = new Error('Ride event not found. Cannot refund.');
+                error.statusCode = 404;
+                throw error;
+            }
+
+            const rideData = rideEventSnapshot.data() || {};
+            const userData = userSnapshot.data() || {};
+
+            if (normalizePhone(rideData.phone) !== phone) {
+                const error = new Error('Ride event does not belong to this account.');
+                error.statusCode = 403;
+                throw error;
+            }
+
+            if (rideData.refunded === true) {
+                alreadyRefunded = true;
+                newFreeRides = getEffectiveFreeRides(userData);
+                return;
+            }
+
+            const ridesDeducted = Number(rideData.ridesDeducted || 0);
+            if (ridesDeducted <= 0) {
+                // Unlimited plan or zero deduction, nothing to refund
+                newFreeRides = getEffectiveFreeRides(userData);
+                return;
+            }
+
+            refundedAmount = ridesDeducted;
+            const currentFreeRides = getEffectiveFreeRides(userData);
+            newFreeRides = currentFreeRides + ridesDeducted;
+            const newTotalRides = Math.max(0, Number(userData.totalRides || 0) - ridesDeducted);
+
+            transaction.update(userRef, {
+                freeRidesLeft: newFreeRides,
+                credits: newFreeRides,
+                totalRides: newTotalRides,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
+            transaction.update(rideEventRef, {
+                refunded: true,
+                refundedAt: admin.firestore.FieldValue.serverTimestamp(),
+                refundReason: reason
+            });
+        });
+
+        if (alreadyRefunded) {
+            return res.json({
+                success: true,
+                refunded: false,
+                alreadyRefunded: true,
+                remainingFreeRides: newFreeRides,
+                message: 'Already refunded.'
+            });
+        }
+
+        if (refundedAmount === 0) {
+             return res.json({
+                success: true,
+                refunded: false,
+                alreadyRefunded: false,
+                remainingFreeRides: newFreeRides,
+                message: 'No deduction found to refund (unlimited plan or zero).'
+            });
+        }
+
+        return res.json({
+            success: true,
+            refunded: true,
+            alreadyRefunded: false,
+            remainingFreeRides: newFreeRides,
+            message: `Refunded ${refundedAmount} ride(s) successfully.`
+        });
+
+    } catch (error) {
+        console.error('REFUND RIDE ERROR:', error);
+        return res.status(error.statusCode || 500).json({
+            success: false,
+            message: error.message || 'Unable to refund ride.'
         });
     }
 });
