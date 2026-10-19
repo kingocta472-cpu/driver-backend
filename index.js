@@ -1518,7 +1518,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
 });
 
 // ============================================================
-// DEDUCT ONE RIDE (PLAN-AWARE)
+// DEDUCT ONE RIDE (PLAN-AWARE + REDIS SAFETY LOCK)
 // ============================================================
 
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
@@ -1536,6 +1536,20 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
         }
         if (rideEventId.length > RIDE_EVENT_ID_MAX_LENGTH) {
             return res.status(400).json({ success: false, message: `rideEventId must be ${RIDE_EVENT_ID_MAX_LENGTH} characters or fewer.` });
+        }
+
+        // ✅ NAYA: 3 Second Cooldown Lock (Taaki bot galti se jaldi-jaldi credit na kaate)
+        const deductLockKey = `ride_deduct_lock:${phone}`;
+        const hasRecentDeduction = await redis.get(deductLockKey);
+        
+        if (hasRecentDeduction) {
+            console.log(`BLOCKED RAPID DEDUCTION: Phone ${phone} tried to deduct too fast.`);
+            return res.json({
+                success: true,
+                alreadyProcessed: false,
+                ridesDeducted: 0,
+                message: 'Ride deduction cooldown active. Skipping to prevent double deduction.'
+            });
         }
 
         const db = getDB();
@@ -1624,6 +1638,11 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             error.statusCode = 402;
             throw error;
         });
+
+        // ✅ NAYA: Credit katne ke baad 3 second ka lock set karo
+        if (!alreadyProcessed && !unlimitedActive) {
+            await redis.setex(deductLockKey, 3, 'locked');
+        }
 
         if (alreadyProcessed) {
             return res.json({
