@@ -251,7 +251,7 @@ const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
-// APP UPDATE CONFIGURATION  (v1.13.0) ✅ UPDATED
+// APP UPDATE CONFIGURATION  (v1.13.0)
 // ============================================================
 const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.13.0').trim();
 const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.13.0').trim();
@@ -1518,7 +1518,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
 });
 
 // ============================================================
-// DEDUCT ONE RIDE (PLAN-AWARE + REDIS SAFETY LOCK)
+// DEDUCT ONE RIDE (PLAN-AWARE + SAFE REDIS LOCK)
 // ============================================================
 
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
@@ -1538,22 +1538,56 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             return res.status(400).json({ success: false, message: `rideEventId must be ${RIDE_EVENT_ID_MAX_LENGTH} characters or fewer.` });
         }
 
-        // ✅ NAYA: 3 Second Cooldown Lock (Taaki bot galti se jaldi-jaldi credit na kaate)
+        // ✅ SAFE: Redis lock check with try-catch (server kabhi crash nahi hoga)
         const deductLockKey = `ride_deduct_lock:${phone}`;
-        const hasRecentDeduction = await redis.get(deductLockKey);
-        
-        if (hasRecentDeduction) {
-            console.log(`BLOCKED RAPID DEDUCTION: Phone ${phone} tried to deduct too fast.`);
-            return res.json({
-                success: true,
-                alreadyProcessed: false,
-                ridesDeducted: 0,
-                message: 'Ride deduction cooldown active. Skipping to prevent double deduction.'
-            });
+        let hasRecentDeduction = false;
+        try {
+            const lockValue = await redis.get(deductLockKey);
+            hasRecentDeduction = lockValue !== null && lockValue !== undefined;
+        } catch (redisError) {
+            console.error('REDIS LOCK CHECK ERROR (skipping lock):', redisError);
+            hasRecentDeduction = false;
         }
 
         const db = getDB();
         const userRef = db.collection('users').doc(phone);
+
+        // ✅ IMPORTANT: Agar lock laga hua hai, toh pehle check karo user unlimited hai ya nahi
+        // Unlimited users ko lock KABHI block nahi karega
+        if (hasRecentDeduction) {
+            let lockedUserIsUnlimited = false;
+            let lockedUserFreeRides = 0;
+            let lockedUserPlanType = PLAN_TYPE_NONE;
+
+            try {
+                const quickUserSnap = await userRef.get();
+                if (quickUserSnap.exists) {
+                    const quickData = quickUserSnap.data() || {};
+                    const expiry = Number(quickData.planExpiry || 0);
+                    lockedUserIsUnlimited = expiry > Date.now();
+                    lockedUserFreeRides = getEffectiveFreeRides(quickData);
+                    lockedUserPlanType = lockedUserIsUnlimited ? String(quickData.activePlan || PLAN_TYPE_NONE) : PLAN_TYPE_NONE;
+                }
+            } catch (quickErr) {
+                console.error('LOCK UNLIMITED-CHECK ERROR:', quickErr);
+            }
+
+            if (!lockedUserIsUnlimited) {
+                console.log(`BLOCKED RAPID DEDUCTION: Phone ${phone} (cooldown active)`);
+                return res.json({
+                    success: true,
+                    alreadyProcessed: false,
+                    ridesDeducted: 0,
+                    unlimited: false,
+                    planType: lockedUserPlanType,
+                    remainingFreeRides: lockedUserFreeRides,
+                    remainingCredits: lockedUserFreeRides,
+                    message: 'Ride deduction cooldown active. Skipping to prevent double deduction.'
+                });
+            }
+            // Agar user unlimited hai, toh lock ignore karo — neeche transaction chalega
+        }
+
         const rideEventRef = db.collection('rideCreditEvents').doc(createRideEventDocumentId(phone, rideEventId));
 
         let remainingFreeRides = 0;
@@ -1639,9 +1673,13 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             throw error;
         });
 
-        // ✅ NAYA: Credit katne ke baad 3 second ka lock set karo
+        // ✅ SAFE: Lock set karo sirf non-unlimited users ke liye, agar Redis fail ho toh ignore karo
         if (!alreadyProcessed && !unlimitedActive) {
-            await redis.setex(deductLockKey, 3, 'locked');
+            try {
+                await redis.setex(deductLockKey, 2, 'locked');  // 3s → 2s (kam aggressive)
+            } catch (redisError) {
+                console.error('REDIS LOCK SET ERROR (ignored):', redisError);
+            }
         }
 
         if (alreadyProcessed) {
@@ -1690,7 +1728,7 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
 });
 
 // ============================================================
-// ✅ NEW: REFUND RIDE (Auto-refund for aggressive cuts)
+// REFUND RIDE (Auto-refund for aggressive cuts)
 // ============================================================
 
 app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
@@ -1748,7 +1786,6 @@ app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
 
             const ridesDeducted = Number(rideData.ridesDeducted || 0);
             if (ridesDeducted <= 0) {
-                // Unlimited plan or zero deduction, nothing to refund
                 newFreeRides = getEffectiveFreeRides(userData);
                 return;
             }
