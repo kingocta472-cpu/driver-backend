@@ -251,11 +251,11 @@ const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
-// APP UPDATE CONFIGURATION  (v1.13.0)
+// APP UPDATE CONFIGURATION  (v1.14.0) ✅ UPDATED LINK & VERSION
 // ============================================================
-const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.13.0').trim();
+const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.14.0').trim();
 const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.13.0').trim();
-const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.13.0/app-release.apk').trim();
+const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.14.0/app-release.apk').trim();
 const APP_UPDATE_TITLE = String(process.env.APP_UPDATE_TITLE || 'New Update Available').trim();
 const APP_UPDATE_MESSAGE = String(process.env.APP_UPDATE_MESSAGE || 'New features and improvements are ready!').trim();
 const APP_RELEASE_NOTES = String(process.env.APP_RELEASE_NOTES || 'Smart Ride Detection, Minimum Fare Filter, Pickup Distance Filter, Trip Distance Filter, Target & Blocked Areas, Auto Car & Bike Selection, Keyword & Blocked Keyword Filters, Easy-to-Use Interface').trim();
@@ -1520,10 +1520,6 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
 // ============================================================
 // DEDUCT ONE RIDE (PLAN-AWARE) — 100% ACCURATE
 // ============================================================
-// NOTE: Redis time-based lock REMOVED.
-// Reason: New app only sends deduct call on CONFIRMED success.
-// Firestore rideEventId dedup handles retries (no double charge).
-// Each confirmed success = exactly 1 credit cut. 100% accurate.
 
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
     try {
