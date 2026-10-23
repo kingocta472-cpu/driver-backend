@@ -196,11 +196,12 @@ async function handleDriverTrackerAdmin(req, res) {
 }
 
 // ============================================================
-// CONFIG
+// CONFIG ✅ NAYA: TIME BASED SYSTEM
 // ============================================================
 
-const FREE_START_RIDES = 10;
-const REFERRAL_BONUS_RIDES = 5;
+// ✅ NAYA: 24 Hours Trial & 3 Hours Referral
+const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000; 
+const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000; 
 
 const DAILY_PLAN_AMOUNT = 15;
 const DAILY_PLAN_DURATION_MS = 24 * 60 * 60 * 1000;
@@ -240,26 +241,23 @@ const VALID_PLAN_TYPES = [
     PLAN_TYPE_MONTHLY
 ];
 
-const FREE_START_CREDITS = 10;
-const REFERRAL_BONUS_CREDITS = 5;
 const MIN_RECHARGE_RUPEES = 10;
 const MAX_RECHARGE_RUPEES = 100000;
-const CREDIT_PER_RUPEE = 1;
 
 const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 // ============================================================
-// APP UPDATE CONFIGURATION  (v1.14.0) ✅ UPDATED LINK & VERSION
+// APP UPDATE CONFIGURATION ✅ UPDATED LINK & VERSION
 // ============================================================
-const APP_LATEST_VERSION = String(process.env.APP_LATEST_VERSION || '1.14.0').trim();
-const APP_MINIMUM_VERSION = String(process.env.APP_MINIMUM_VERSION || '1.13.0').trim();
-const APP_APK_URL = String(process.env.APP_APK_URL || 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.14.0/app-release.apk').trim();
-const APP_UPDATE_TITLE = String(process.env.APP_UPDATE_TITLE || 'New Update Available').trim();
-const APP_UPDATE_MESSAGE = String(process.env.APP_UPDATE_MESSAGE || 'New features and improvements are ready!').trim();
-const APP_RELEASE_NOTES = String(process.env.APP_RELEASE_NOTES || 'Smart Ride Detection, Minimum Fare Filter, Pickup Distance Filter, Trip Distance Filter, Target & Blocked Areas, Auto Car & Bike Selection, Keyword & Blocked Keyword Filters, Easy-to-Use Interface').trim();
-const APP_PUBLISHED_AT = String(process.env.APP_PUBLISHED_AT || '').trim();
+const APP_LATEST_VERSION = '1.15.0';
+const APP_MINIMUM_VERSION = '1.15.0';
+const APP_APK_URL = 'https://driver-ride-picker-website.vercel.app/'; 
+const APP_UPDATE_TITLE = 'New Update Available';
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version install karein.';
+const APP_RELEASE_NOTES = '24 Hours Free Trial, +3 Hours Referral Bonus, Smart Ola/Uber Auto-Accept Fix, Time-based plans';
+const APP_PUBLISHED_AT = '';
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const RIDE_EVENT_ID_MAX_LENGTH = 200;
@@ -418,17 +416,6 @@ function normalizeReferralCode(code) {
 
 function isValidPin(pin) {
     return new RegExp(`^\\d{${PIN_LENGTH}}$`).test(String(pin || '').trim());
-}
-
-function getEffectiveFreeRides(userData) {
-    if (!userData) return 0;
-    if (typeof userData.freeRidesLeft === 'number') {
-        return Number(userData.freeRidesLeft) || 0;
-    }
-    if (typeof userData.credits === 'number') {
-        return Number(userData.credits) || 0;
-    }
-    return 0;
 }
 
 function isPlanActive(userData) {
@@ -757,49 +744,30 @@ app.get('/api/app/update', (req, res) => {
         res.set('Expires', '0');
 
         const currentVersion = String(req.query.currentVersion || '').trim();
-        const latestVersionValid = Boolean(parseVersion(APP_LATEST_VERSION));
-        const minimumVersionValid = Boolean(parseVersion(APP_MINIMUM_VERSION));
+        
+        // Calculate if update is needed based on version comparison
+        const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
+        const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
+        
+        const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
+        const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
 
-        if (!latestVersionValid || !minimumVersionValid) {
-            return res.status(500).json({
-                success: false,
-                message: 'App update configuration contains an invalid version.'
-            });
-        }
-
-        const latestVsMinimum = compareVersions(APP_LATEST_VERSION, APP_MINIMUM_VERSION);
-        if (latestVsMinimum !== null && latestVsMinimum < 0) {
-            return res.status(500).json({
-                success: false,
-                message: 'App update configuration is invalid: minimum version is newer than latest version.'
-            });
-        }
-
-        const hasValidApkUrl = isValidHttpsUrl(APP_APK_URL);
-        let updateAvailable = false;
-        let forceUpdate = false;
-        let currentVsLatest = null;
-        let currentVsMinimum = null;
-
-        if (currentVersion) {
-            currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
-            currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
-            updateAvailable = currentVsLatest !== null && currentVsLatest < 0 && hasValidApkUrl;
-            forceUpdate = currentVsMinimum !== null && currentVsMinimum < 0 && hasValidApkUrl;
-        }
-
+        // Return requested keys along with keys required by Android app
         return res.json({
             success: true,
-            currentVersion: currentVersion || null,
             latestVersion: APP_LATEST_VERSION,
             minimumVersion: APP_MINIMUM_VERSION,
+            forceUpdate: forceUpdate, // Dynamic calculation (no longer hardcoded true)
+            updateMessage: APP_UPDATE_MESSAGE,
+            downloadUrl: APP_APK_URL,
+            
+            // Backward compatibility for current Android App
             updateAvailable: updateAvailable,
-            forceUpdate: forceUpdate,
-            apkUrl: hasValidApkUrl ? APP_APK_URL : '',
-            title: APP_UPDATE_TITLE,
+            apkUrl: APP_APK_URL,
             message: APP_UPDATE_MESSAGE,
+            title: APP_UPDATE_TITLE,
             releaseNotes: APP_RELEASE_NOTES,
-            publishedAt: APP_PUBLISHED_AT || null
+            currentVersion: currentVersion || null
         });
     } catch (error) {
         console.error('APP UPDATE STATUS ERROR:', error);
@@ -1047,7 +1015,7 @@ app.get('/api/dbtest', async (req, res) => {
 });
 
 // ============================================================
-// LOGIN / REGISTER
+// LOGIN / REGISTER ✅ NAYA: TIME BASED SYSTEM
 // ============================================================
 
 app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
@@ -1097,7 +1065,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
         const driverFirebaseUid = generateDriverFirebaseUid(phone);
 
         let isNewUser = false;
-        let trialRidesAdded = 0;
+        let trialAdded = false;
         let pinWasCreated = false;
         let userData = null;
 
@@ -1125,17 +1093,20 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 pinWasCreated = true;
             }
 
-            if (typeof userData.freeRidesLeft !== 'number' && typeof userData.credits === 'number') {
-                updates.freeRidesLeft = Number(userData.credits) || 0;
+            // ✅ MIGRATION LOGIC: Purane users ko 24 hours free
+            if (!userData.migratedToTimeSystem) {
+                const now = Date.now();
+                const currentExpiry = Number(userData.planExpiry || 0);
+                updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS;
+                updates.migratedToTimeSystem = true;
+                trialAdded = true;
             }
-            if (typeof userData.freeRidesLeft !== 'number' && typeof updates.freeRidesLeft !== 'number') {
-                updates.freeRidesLeft = 0;
-            }
+
             if (typeof userData.activePlan !== 'string') {
                 updates.activePlan = PLAN_TYPE_NONE;
             }
             if (typeof userData.planExpiry !== 'number') {
-                updates.planExpiry = 0;
+                updates.planExpiry = updates.planExpiry || 0;
             }
             if (typeof userData.totalRides !== 'number') {
                 updates.totalRides = Number(userData.totalRides || 0);
@@ -1228,14 +1199,13 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 }
 
                 const trialGranted = !trialDoc.exists && !deviceTrialDoc.exists;
-                const startingRides = trialGranted ? FREE_START_RIDES : 0;
+                const startingExpiry = trialGranted ? (Date.now() + TRIAL_DURATION_MS) : 0;
 
                 transaction.set(userRef, {
                     phone: phone,
                     firebaseUid: driverFirebaseUid,
-                    freeRidesLeft: startingRides,
                     activePlan: PLAN_TYPE_NONE,
-                    planExpiry: 0,
+                    planExpiry: startingExpiry,
                     totalRides: 0,
                     referralCode: newReferralCode,
                     referredBy: referralApplied ? referrerPhone : null,
@@ -1246,6 +1216,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                     trialClaimed: trialGranted,
                     trialInstallIdHash: hashInstallId(installId),
                     deviceIdHash: hashInstallId(trialDeviceId),
+                    migratedToTimeSystem: true,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     pinCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
                     updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -1255,14 +1226,14 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                     transaction.set(trialClaimRef, {
                         installIdHash: hashInstallId(installId),
                         firstPhone: phone,
-                        ridesGranted: FREE_START_RIDES,
+                        hoursGranted: 24,
                         createdAt: admin.firestore.FieldValue.serverTimestamp()
                     });
 
                     transaction.set(deviceTrialClaimRef, {
                         deviceIdHash: hashInstallId(trialDeviceId),
                         firstPhone: phone,
-                        ridesGranted: FREE_START_RIDES,
+                        hoursGranted: 24,
                         createdAt: admin.firestore.FieldValue.serverTimestamp()
                     });
                 }
@@ -1271,7 +1242,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                     transaction.set(referralLedgerRef, {
                         referrerPhone: referrerPhone,
                         referredPhone: phone,
-                        bonusRides: REFERRAL_BONUS_RIDES,
+                        bonusHours: 3,
                         status: 'pending',
                         createdAt: admin.firestore.FieldValue.serverTimestamp()
                     });
@@ -1305,10 +1276,10 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                     }
                 }
 
-                trialRidesAdded = 0;
+                trialAdded = false;
                 isNewUser = false;
             } else {
-                trialRidesAdded = transactionResult.trialGranted ? FREE_START_RIDES : 0;
+                trialAdded = transactionResult.trialGranted;
                 const createdUserDoc = await userRef.get();
                 userData = createdUserDoc.data() || {};
 
@@ -1325,11 +1296,17 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                         if (!referrerDoc.exists) return;
 
                         const referrerData = referrerDoc.data() || {};
-                        const currentFreeRides = getEffectiveFreeRides(referrerData);
-                        const updatedFreeRides = currentFreeRides + REFERRAL_BONUS_RIDES;
+                        let refExpiry = Number(referrerData.planExpiry || 0);
+                        const now = Date.now();
+                        
+                        // Agar referrer ka plan expire ho chuka hai, toh aaj se 3 ghante add karo
+                        if (refExpiry < now) {
+                            refExpiry = now;
+                        }
+                        const updatedExpiry = refExpiry + REFERRAL_BONUS_MS;
 
                         transaction.update(referrerRef, {
-                            freeRidesLeft: updatedFreeRides,
+                            planExpiry: updatedExpiry,
                             updatedAt: admin.firestore.FieldValue.serverTimestamp()
                         });
 
@@ -1362,15 +1339,14 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             referralCount = 0;
         }
 
-        const freeRidesLeft = getEffectiveFreeRides(userData);
         const planExpiry = Number(userData.planExpiry || 0);
         const activePlan = getActivePlanType(userData);
         const isUnlimited = planExpiry > Date.now();
 
         let welcomeMessage;
         if (isNewUser) {
-            welcomeMessage = trialRidesAdded > 0
-                ? `Welcome! ${trialRidesAdded} free rides added.`
+            welcomeMessage = trialAdded
+                ? `Welcome! 24 Hours Free Trial activated.`
                 : 'Account created. This installation has already used the free trial.';
         } else {
             welcomeMessage = pinWasCreated
@@ -1381,8 +1357,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
         return res.json({
             success: true,
             isNewUser: isNewUser,
-            trialRidesAdded: trialRidesAdded,
-            trialCreditsAdded: trialRidesAdded,
+            trialPlanAdded: trialAdded,
             pinWasCreated: pinWasCreated,
             authMethod: 'pin',
             firebaseCustomToken: firebaseCustomToken,
@@ -1390,11 +1365,9 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             user: {
                 phone: userData.phone || phone,
                 firebaseUid: driverFirebaseUid,
-                freeRidesLeft: freeRidesLeft,
                 activePlan: activePlan,
                 planExpiry: planExpiry,
                 isUnlimited: isUnlimited,
-                credits: freeRidesLeft,
                 totalRides: Number(userData.totalRides || 0),
                 referralCode: userData.referralCode || '',
                 referralCount: referralCount
@@ -1407,7 +1380,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
 });
 
 // ============================================================
-// AUTHENTICATED USER BALANCE
+// AUTHENTICATED USER BALANCE ✅ NAYA: TIME BASED
 // ============================================================
 
 app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
@@ -1439,19 +1412,16 @@ app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
             referralCount = Number(data.referralCount || 0);
         }
 
-        const freeRidesLeft = getEffectiveFreeRides(data);
         const planExpiry = Number(data.planExpiry || 0);
         const activePlan = getActivePlanType(data);
         const isUnlimited = planExpiry > Date.now();
 
         return res.json({
             success: true,
-            freeRidesLeft: freeRidesLeft,
             activePlan: activePlan,
             planExpiry: planExpiry,
             planExpiryIso: planExpiry > 0 ? new Date(planExpiry).toISOString() : null,
             isUnlimited: isUnlimited,
-            credits: freeRidesLeft,
             totalRides: Number(data.totalRides || 0),
             referralCode: data.referralCode || '',
             referralCount: referralCount
@@ -1463,7 +1433,7 @@ app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
 });
 
 // ============================================================
-// REFERRAL DETAILS
+// REFERRAL DETAILS ✅ NAYA: TIME BASED
 // ============================================================
 
 app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
@@ -1485,7 +1455,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
         const referralCode = String(userData.referralCode || '').trim();
 
         let successfulReferrals = 0;
-        let ridesEarned = 0;
+        let hoursEarned = 0;
 
         try {
             const rewardedSnapshot = await db
@@ -1495,20 +1465,19 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
                 .get();
 
             successfulReferrals = rewardedSnapshot.size;
-            ridesEarned = successfulReferrals * REFERRAL_BONUS_RIDES;
+            hoursEarned = successfulReferrals * 3; // 3 hours per referral
         } catch (referralError) {
             console.error('REFERRAL COUNT ERROR:', referralError);
             successfulReferrals = Number(userData.referralCount || 0);
-            ridesEarned = successfulReferrals * REFERRAL_BONUS_RIDES;
+            hoursEarned = successfulReferrals * 3;
         }
 
         return res.json({
             success: true,
             referralCode: referralCode,
             successfulReferrals: successfulReferrals,
-            ridesEarned: ridesEarned,
-            creditsEarned: ridesEarned,
-            bonusPerReferral: REFERRAL_BONUS_RIDES,
+            hoursEarned: hoursEarned,
+            bonusHoursPerReferral: 3,
             message: 'Referral details loaded.'
         });
     } catch (error) {
@@ -1518,7 +1487,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
 });
 
 // ============================================================
-// DEDUCT ONE RIDE (PLAN-AWARE) — 100% ACCURATE
+// DEDUCT RIDE (DISABLED FOR TIME BASED SYSTEM)
 // ============================================================
 
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
@@ -1529,265 +1498,61 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             return res.status(403).json({ success: false, message: 'You can only use your own account.' });
         }
 
-        const rideEventId = normalizeRideEventId(req.body.rideEventId);
-
-        if (!rideEventId) {
-            return res.status(400).json({ success: false, message: 'rideEventId is required for successful ride credit deduction.' });
-        }
-        if (rideEventId.length > RIDE_EVENT_ID_MAX_LENGTH) {
-            return res.status(400).json({ success: false, message: `rideEventId must be ${RIDE_EVENT_ID_MAX_LENGTH} characters or fewer.` });
-        }
-
         const db = getDB();
         const userRef = db.collection('users').doc(phone);
-        const rideEventRef = db.collection('rideCreditEvents').doc(createRideEventDocumentId(phone, rideEventId));
+        const userSnapshot = await userRef.get();
 
-        let remainingFreeRides = 0;
-        let alreadyProcessed = false;
-        let unlimitedActive = false;
-        let activePlanType = PLAN_TYPE_NONE;
-
-        await db.runTransaction(async transaction => {
-            const rideEventSnapshot = await transaction.get(rideEventRef);
-            const userSnapshot = await transaction.get(userRef);
-
-            if (!userSnapshot.exists) {
-                const error = new Error('Driver account not found.');
-                error.statusCode = 404;
-                throw error;
-            }
-
-            const userData = userSnapshot.data() || {};
-            const planExpiry = Number(userData.planExpiry || 0);
-            const isUnlimited = planExpiry > Date.now();
-            const currentFreeRides = getEffectiveFreeRides(userData);
-
-            // Dedup: same rideEventId already processed → no double charge
-            if (rideEventSnapshot.exists) {
-                remainingFreeRides = currentFreeRides;
-                unlimitedActive = isUnlimited;
-                activePlanType = getActivePlanType(userData);
-                alreadyProcessed = true;
-                return;
-            }
-
-            if (isUnlimited) {
-                unlimitedActive = true;
-                activePlanType = String(userData.activePlan || PLAN_TYPE_NONE);
-                remainingFreeRides = currentFreeRides;
-                const totalRides = Number(userData.totalRides || 0) + 1;
-
-                transaction.set(rideEventRef, {
-                    phone: phone,
-                    rideEventId: rideEventId,
-                    ridesDeducted: 0,
-                    unlimited: true,
-                    planType: activePlanType,
-                    remainingFreeRides: remainingFreeRides,
-                    totalRidesAfter: totalRides,
-                    status: 'processed',
-                    createdAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-                transaction.update(userRef, {
-                    totalRides: totalRides,
-                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-                return;
-            }
-
-            if (currentFreeRides > 0) {
-                remainingFreeRides = currentFreeRides - 1;
-                const totalRides = Number(userData.totalRides || 0) + 1;
-
-                transaction.set(rideEventRef, {
-                    phone: phone,
-                    rideEventId: rideEventId,
-                    ridesDeducted: 1,
-                    unlimited: false,
-                    planType: PLAN_TYPE_NONE,
-                    remainingFreeRides: remainingFreeRides,
-                    totalRidesAfter: totalRides,
-                    status: 'processed',
-                    createdAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-
-                transaction.update(userRef, {
-                    freeRidesLeft: remainingFreeRides,
-                    credits: remainingFreeRides,
-                    totalRides: totalRides,
-                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-                return;
-            }
-
-            const error = new Error('No active plan and no free rides left. Please recharge.');
-            error.statusCode = 402;
-            throw error;
-        });
-
-        if (alreadyProcessed) {
-            return res.json({
-                success: true,
-                alreadyProcessed: true,
-                ridesDeducted: 0,
-                unlimited: unlimitedActive,
-                planType: activePlanType,
-                remainingFreeRides: remainingFreeRides,
-                remainingCredits: remainingFreeRides,
-                message: 'Ride already processed for this ride.'
-            });
+        if (!userSnapshot.exists) {
+            return res.status(404).json({ success: false, message: 'Driver account not found.' });
         }
 
-        if (unlimitedActive) {
+        const userData = userSnapshot.data() || {};
+        const planExpiry = Number(userData.planExpiry || 0);
+        const isUnlimited = planExpiry > Date.now();
+        const activePlanType = getActivePlanType(userData);
+
+        if (isUnlimited) {
+            // Ride count badha do bas, credit cut mat karo
+            const totalRides = Number(userData.totalRides || 0) + 1;
+            await userRef.update({
+                totalRides: totalRides,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+
             return res.json({
                 success: true,
                 alreadyProcessed: false,
                 ridesDeducted: 0,
                 unlimited: true,
                 planType: activePlanType,
-                remainingFreeRides: remainingFreeRides,
-                remainingCredits: remainingFreeRides,
                 message: `Unlimited ${activePlanType} plan active. No deduction.`
             });
+        } else {
+            return res.status(402).json({
+                success: false,
+                message: 'Plan expired. Please recharge to continue.'
+            });
         }
-
-        return res.json({
-            success: true,
-            alreadyProcessed: false,
-            ridesDeducted: 1,
-            unlimited: false,
-            planType: PLAN_TYPE_NONE,
-            remainingFreeRides: remainingFreeRides,
-            remainingCredits: remainingFreeRides,
-            message: 'Free ride deducted.'
-        });
     } catch (error) {
         console.error('DEDUCT RIDE ERROR:', error);
         return res.status(error.statusCode || 500).json({
             success: false,
-            message: error.message || 'Unable to deduct ride.'
+            message: error.message || 'Unable to process ride.'
         });
     }
 });
 
 // ============================================================
-// REFUND RIDE (Manual/auto refund for wrong cuts)
+// REFUND RIDE (DISABLED FOR TIME BASED SYSTEM)
 // ============================================================
 
 app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
-    try {
-        const phone = normalizePhone(req.body.phone);
-        if (!phoneMatchesAuthenticatedUser(req, phone)) {
-            return res.status(403).json({ success: false, message: 'You can only use your own account.' });
-        }
-
-        const rideEventId = normalizeRideEventId(req.body.rideEventId);
-        const reason = String(req.body.reason || 'unknown').slice(0, 200);
-
-        if (!rideEventId) {
-            return res.status(400).json({ success: false, message: 'rideEventId is required for refund.' });
-        }
-
-        const db = getDB();
-        const userRef = db.collection('users').doc(phone);
-        const rideEventRef = db.collection('rideCreditEvents').doc(createRideEventDocumentId(phone, rideEventId));
-
-        let refundedAmount = 0;
-        let newFreeRides = 0;
-        let alreadyRefunded = false;
-
-        await db.runTransaction(async transaction => {
-            const rideEventSnapshot = await transaction.get(rideEventRef);
-            const userSnapshot = await transaction.get(userRef);
-
-            if (!userSnapshot.exists) {
-                const error = new Error('Driver account not found.');
-                error.statusCode = 404;
-                throw error;
-            }
-
-            if (!rideEventSnapshot.exists) {
-                const error = new Error('Ride event not found. Cannot refund.');
-                error.statusCode = 404;
-                throw error;
-            }
-
-            const rideData = rideEventSnapshot.data() || {};
-            const userData = userSnapshot.data() || {};
-
-            if (normalizePhone(rideData.phone) !== phone) {
-                const error = new Error('Ride event does not belong to this account.');
-                error.statusCode = 403;
-                throw error;
-            }
-
-            if (rideData.refunded === true) {
-                alreadyRefunded = true;
-                newFreeRides = getEffectiveFreeRides(userData);
-                return;
-            }
-
-            const ridesDeducted = Number(rideData.ridesDeducted || 0);
-            if (ridesDeducted <= 0) {
-                newFreeRides = getEffectiveFreeRides(userData);
-                return;
-            }
-
-            refundedAmount = ridesDeducted;
-            const currentFreeRides = getEffectiveFreeRides(userData);
-            newFreeRides = currentFreeRides + ridesDeducted;
-            const newTotalRides = Math.max(0, Number(userData.totalRides || 0) - ridesDeducted);
-
-            transaction.update(userRef, {
-                freeRidesLeft: newFreeRides,
-                credits: newFreeRides,
-                totalRides: newTotalRides,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            transaction.update(rideEventRef, {
-                refunded: true,
-                refundedAt: admin.firestore.FieldValue.serverTimestamp(),
-                refundReason: reason
-            });
-        });
-
-        if (alreadyRefunded) {
-            return res.json({
-                success: true,
-                refunded: false,
-                alreadyRefunded: true,
-                remainingFreeRides: newFreeRides,
-                message: 'Already refunded.'
-            });
-        }
-
-        if (refundedAmount === 0) {
-             return res.json({
-                success: true,
-                refunded: false,
-                alreadyRefunded: false,
-                remainingFreeRides: newFreeRides,
-                message: 'No deduction found to refund (unlimited plan or zero).'
-            });
-        }
-
-        return res.json({
-            success: true,
-            refunded: true,
-            alreadyRefunded: false,
-            remainingFreeRides: newFreeRides,
-            message: `Refunded ${refundedAmount} ride(s) successfully.`
-        });
-
-    } catch (error) {
-        console.error('REFUND RIDE ERROR:', error);
-        return res.status(error.statusCode || 500).json({
-            success: false,
-            message: error.message || 'Unable to refund ride.'
-        });
-    }
+    return res.json({
+        success: true,
+        refunded: false,
+        alreadyRefunded: false,
+        message: 'Refund not applicable in time-based system.'
+    });
 });
 
 // ============================================================
