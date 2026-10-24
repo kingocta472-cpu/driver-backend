@@ -12,7 +12,11 @@ const redis = new Redis({
     token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 });
 
-app.use(cors());
+// ✅ UPDATED CORS: App Check header ko allow karne ke liye
+app.use(cors({
+    origin: '*',
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Firebase-AppCheck']
+}));
 app.use(express.json());
 
 // ============================================================
@@ -199,7 +203,6 @@ async function handleDriverTrackerAdmin(req, res) {
 // CONFIG ✅ NAYA: TIME BASED SYSTEM
 // ============================================================
 
-// ✅ NAYA: 24 Hours Trial & 3 Hours Referral
 const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000; 
 const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000; 
 
@@ -241,9 +244,6 @@ const VALID_PLAN_TYPES = [
     PLAN_TYPE_MONTHLY
 ];
 
-const MIN_RECHARGE_RUPEES = 10;
-const MAX_RECHARGE_RUPEES = 100000;
-
 const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
@@ -260,7 +260,6 @@ const APP_RELEASE_NOTES = '24 Hours Free Trial, +3 Hours Referral Bonus, Smart O
 const APP_PUBLISHED_AT = '';
 
 const INSTALL_ID_MAX_LENGTH = 200;
-const RIDE_EVENT_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -400,13 +399,6 @@ function normalizeInstallId(installId) {
     return String(installId).trim().slice(0, INSTALL_ID_MAX_LENGTH);
 }
 
-function normalizeRideEventId(rideEventId) {
-    if (rideEventId === undefined || rideEventId === null) {
-        return '';
-    }
-    return String(rideEventId).trim();
-}
-
 function normalizeReferralCode(code) {
     if (!code) {
         return '';
@@ -456,15 +448,6 @@ function compareVersions(left, right) {
     return 0;
 }
 
-function isValidHttpsUrl(value) {
-    try {
-        const parsed = new URL(value);
-        return parsed.protocol === 'https:';
-    } catch (_) {
-        return false;
-    }
-}
-
 function generateReferralCode() {
     const bytes = crypto.randomBytes(REFERRAL_CODE_LENGTH);
     let code = '';
@@ -512,10 +495,6 @@ function hashPhoneForAuth(phone) {
     return crypto.createHash('sha256').update(`driver-ride-picker-auth:${phone}`).digest('hex');
 }
 
-function createRideEventDocumentId(phone, rideEventId) {
-    return crypto.createHash('sha256').update(`driver-ride-picker-ride-event:${phone}:${rideEventId}`).digest('hex');
-}
-
 function generateDriverFirebaseUid(phone) {
     const projectId = process.env.FIREBASE_PROJECT_ID || 'driver-ride-picker';
     const digest = crypto.createHash('sha256').update(`driver:${projectId}:${phone}`).digest('hex');
@@ -556,36 +535,30 @@ async function decodeFirebaseToken(req) {
     return admin.auth().verifyIdToken(idToken);
 }
 
-async function verifyFirebaseIdentity(req, res, next) {
+// ✅ NAYA: App Check Middleware
+async function verifyAppCheck(req, res, next) {
+    const appCheckToken = req.headers['x-firebase-appcheck'];
+
+    if (!appCheckToken) {
+        return res.status(403).json({ success: false, message: 'Access Denied: Missing App Check Token.' });
+    }
+
     try {
-        const decoded = await decodeFirebaseToken(req);
-        if (!decoded.uid) {
-            return res.status(401).json({ success: false, message: 'Invalid Firebase user.' });
-        }
-        req.firebaseUser = {
-            uid: decoded.uid,
-            signInProvider: decoded.firebase && decoded.firebase.sign_in_provider ? String(decoded.firebase.sign_in_provider) : '',
-            decodedToken: decoded
-        };
+        initializeFirebaseAdmin();
+        await admin.appCheck().verifyToken(appCheckToken);
         next();
     } catch (error) {
-        console.error('FIREBASE IDENTITY ERROR:', error);
-        return res.status(error.statusCode || 401).json({
-            success: false,
-            message: error.message || 'Invalid or expired Firebase authentication token.'
-        });
+        console.error('APP CHECK ERROR:', error);
+        return res.status(403).json({ success: false, message: 'Access Denied: Invalid App Check Token.' });
     }
 }
 
+// ✅ UPDATED: Purane token wale routes ke liye (Baaki API endpoints jo user login ke baad use karte hain)
 async function verifyFirebaseToken(req, res, next) {
     try {
         const decoded = await decodeFirebaseToken(req);
         if (!decoded.uid) {
             return res.status(401).json({ success: false, message: 'Invalid Firebase user.' });
-        }
-        const signInProvider = decoded.firebase && decoded.firebase.sign_in_provider ? String(decoded.firebase.sign_in_provider) : '';
-        if (signInProvider === 'anonymous') {
-            return res.status(401).json({ success: false, message: 'Driver PIN authentication required.' });
         }
         const db = getDB();
         const snapshot = await db.collection('users').where('firebaseUid', '==', decoded.uid).limit(1).get();
@@ -597,7 +570,6 @@ async function verifyFirebaseToken(req, res, next) {
         req.firebaseUser = {
             uid: decoded.uid,
             phone: normalizePhone(userData.phone || userDoc.id),
-            signInProvider: signInProvider,
             decodedToken: decoded,
             userData: userData
         };
@@ -609,9 +581,7 @@ async function verifyFirebaseToken(req, res, next) {
                 uid: req.firebaseUser.uid,
                 method: req.method,
                 endpoint: req.originalUrl
-            })).catch(trackerError => {
-                console.error('DRIVER ACTIVITY TRACKER ERROR:', trackerError);
-            });
+            })).catch(trackerError => console.error('DRIVER ACTIVITY TRACKER ERROR:', trackerError));
         } catch (trackerError) {
             console.error('DRIVER ACTIVITY TRACKER ERROR:', trackerError);
         }
@@ -744,24 +714,19 @@ app.get('/api/app/update', (req, res) => {
         res.set('Expires', '0');
 
         const currentVersion = String(req.query.currentVersion || '').trim();
-        
-        // Calculate if update is needed based on version comparison
         const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
         const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
         
         const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
         const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
 
-        // Return requested keys along with keys required by Android app
         return res.json({
             success: true,
             latestVersion: APP_LATEST_VERSION,
             minimumVersion: APP_MINIMUM_VERSION,
-            forceUpdate: forceUpdate, // Dynamic calculation (no longer hardcoded true)
+            forceUpdate: forceUpdate,
             updateMessage: APP_UPDATE_MESSAGE,
             downloadUrl: APP_APK_URL,
-            
-            // Backward compatibility for current Android App
             updateAvailable: updateAvailable,
             apkUrl: APP_APK_URL,
             message: APP_UPDATE_MESSAGE,
@@ -1004,25 +969,14 @@ app.get('/api/test', (req, res) => {
     });
 });
 
-app.get('/api/dbtest', async (req, res) => {
-    try {
-        const snapshot = await getDB().collection('users').limit(1).get();
-        res.json({ success: true, message: 'Firebase Firestore connected!', userCount: snapshot.size });
-    } catch (error) {
-        console.error('DB TEST ERROR:', error);
-        res.status(500).json({ success: false, message: 'DB Error: ' + error.message });
-    }
-});
-
 // ============================================================
-// LOGIN / REGISTER ✅ NAYA: TIME BASED SYSTEM
+// LOGIN / REGISTER ✅ APP CHECK VERIFIED
 // ============================================================
 
-app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
+// ✅ FIXED: Ab yahan verifyFirebaseIdentity ki jagah verifyAppCheck laga hai
+app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
     try {
-        if (req.firebaseUser.signInProvider !== 'anonymous') {
-            return res.status(401).json({ success: false, message: 'Firebase anonymous authentication required.' });
-        }
+        // Removed the Anonymous Check because we now rely on App Check
 
         const phone = normalizePhone(req.body.phone);
         const pin = String(req.body.pin || '').trim();
@@ -1093,7 +1047,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                 pinWasCreated = true;
             }
 
-            // ✅ MIGRATION LOGIC: Purane users ko 24 hours free
             if (!userData.migratedToTimeSystem) {
                 const now = Date.now();
                 const currentExpiry = Number(userData.planExpiry || 0);
@@ -1124,6 +1077,7 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
             await userRef.update(updates);
             userData = { ...userData, ...updates };
         } else {
+            // New user creation logic ...
             try {
                 const clientIp = String(
                     req.headers['x-forwarded-for'] ||
@@ -1137,7 +1091,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                     const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
 
                     if (currentCount >= TRIAL_IP_LIMIT) {
-                        console.warn(`IP RATE LIMIT HIT: ${clientIp} (count=${currentCount})`);
                         return res.status(429).json({
                             success: false,
                             message: 'Too many new accounts from this network. Please try again tomorrow.'
@@ -1299,7 +1252,6 @@ app.post('/api/auth/login', verifyFirebaseIdentity, async (req, res) => {
                         let refExpiry = Number(referrerData.planExpiry || 0);
                         const now = Date.now();
                         
-                        // Agar referrer ka plan expire ho chuka hai, toh aaj se 3 ghante add karo
                         if (refExpiry < now) {
                             refExpiry = now;
                         }
@@ -1465,7 +1417,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
                 .get();
 
             successfulReferrals = rewardedSnapshot.size;
-            hoursEarned = successfulReferrals * 3; // 3 hours per referral
+            hoursEarned = successfulReferrals * 3; 
         } catch (referralError) {
             console.error('REFERRAL COUNT ERROR:', referralError);
             successfulReferrals = Number(userData.referralCount || 0);
@@ -1487,7 +1439,7 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
 });
 
 // ============================================================
-// DEDUCT RIDE (DISABLED FOR TIME BASED SYSTEM)
+// DEDUCT RIDE & REFUND (SAME AS BEFORE)
 // ============================================================
 
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
@@ -1512,7 +1464,6 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
         const activePlanType = getActivePlanType(userData);
 
         if (isUnlimited) {
-            // Ride count badha do bas, credit cut mat karo
             const totalRides = Number(userData.totalRides || 0) + 1;
             await userRef.update({
                 totalRides: totalRides,
@@ -1534,29 +1485,16 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
             });
         }
     } catch (error) {
-        console.error('DEDUCT RIDE ERROR:', error);
-        return res.status(error.statusCode || 500).json({
-            success: false,
-            message: error.message || 'Unable to process ride.'
-        });
+        return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to process ride.' });
     }
 });
 
-// ============================================================
-// REFUND RIDE (DISABLED FOR TIME BASED SYSTEM)
-// ============================================================
-
 app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
-    return res.json({
-        success: true,
-        refunded: false,
-        alreadyRefunded: false,
-        message: 'Refund not applicable in time-based system.'
-    });
+    return res.json({ success: true, refunded: false, alreadyRefunded: false, message: 'Refund not applicable in time-based system.' });
 });
 
 // ============================================================
-// CREATE RAZORPAY ORDER (PLAN-BASED)
+// PAYMENTS (SAME AS BEFORE)
 // ============================================================
 
 app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
@@ -1564,22 +1502,13 @@ app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
         const phone = getAuthenticatedPhone(req);
         const amountRupees = Number(req.body.amountRupees);
 
-        if (!phone) {
-            return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
-        }
+        if (!phone) return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
 
         const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
-
-        if (!planConfig) {
-            return res.status(400).json({
-                success: false,
-                message: `Only ₹${DAILY_PLAN_AMOUNT} (Daily), ₹${THREE_DAYS_PLAN_AMOUNT} (3 Days), ₹${WEEKLY_PLAN_AMOUNT} (Weekly), ₹${FIFTEEN_DAYS_PLAN_AMOUNT} (15 Days) or ₹${MONTHLY_PLAN_AMOUNT} (Monthly) plans are available.`
-            });
-        }
+        if (!planConfig) return res.status(400).json({ success: false, message: 'Invalid plan amount.' });
 
         const planType = planConfig.type;
         const planDurationMs = planConfig.durationMs;
-
         const receipt = generateReceipt();
         const razorpay = getRazorpay();
 
@@ -1588,48 +1517,23 @@ app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
             currency: 'INR',
             receipt: receipt,
             partial_payment: false,
-            notes: {
-                app: 'Driver Ride Picker',
-                phone: phone,
-                planType: planType,
-                planDurationMs: String(planDurationMs)
-            }
+            notes: { app: 'Driver Ride Picker', phone: phone, planType: planType, planDurationMs: String(planDurationMs) }
         });
 
         await getDB().collection('paymentOrders').doc(order.id).set({
-            orderId: order.id,
-            phone: phone,
-            amountRupees: amountRupees,
-            amountPaise: amountRupees * 100,
-            planType: planType,
-            planDurationMs: planDurationMs,
-            currency: 'INR',
-            status: 'created',
-            receipt: receipt,
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
+            orderId: order.id, phone: phone, amountRupees: amountRupees, amountPaise: amountRupees * 100,
+            planType: planType, planDurationMs: planDurationMs, currency: 'INR', status: 'created',
+            receipt: receipt, createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
         return res.json({
-            success: true,
-            keyId: process.env.RAZORPAY_KEY_ID,
-            orderId: order.id,
-            amount: order.amount,
-            currency: order.currency,
-            planType: planType,
-            planDurationMs: planDurationMs
+            success: true, keyId: process.env.RAZORPAY_KEY_ID, orderId: order.id,
+            amount: order.amount, currency: order.currency, planType: planType, planDurationMs: planDurationMs
         });
     } catch (error) {
-        console.error('RAZORPAY CREATE ORDER ERROR:', error);
-        return res.status(500).json({
-            success: false,
-            message: error.message || 'Unable to create Razorpay order.'
-        });
+        return res.status(500).json({ success: false, message: error.message || 'Unable to create Razorpay order.' });
     }
 });
-
-// ============================================================
-// VERIFY RAZORPAY PAYMENT + ACTIVATE PLAN
-// ============================================================
 
 app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
     try {
@@ -1638,66 +1542,28 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
         const paymentId = String(req.body.paymentId || '').trim();
         const signature = String(req.body.signature || '').trim();
 
-        if (!phone || !orderId || !paymentId || !signature) {
-            return res.status(400).json({ success: false, message: 'Payment verification data is incomplete.' });
-        }
+        if (!phone || !orderId || !paymentId || !signature) return res.status(400).json({ success: false, message: 'Payment data incomplete.' });
 
         const db = getDB();
         const orderRef = db.collection('paymentOrders').doc(orderId);
         const orderSnapshot = await orderRef.get();
 
-        if (!orderSnapshot.exists) {
-            return res.status(404).json({ success: false, message: 'Payment order not found.' });
-        }
-
+        if (!orderSnapshot.exists) return res.status(404).json({ success: false, message: 'Payment order not found.' });
         const orderData = orderSnapshot.data() || {};
-
-        if (normalizePhone(orderData.phone) !== phone) {
-            return res.status(403).json({ success: false, message: 'Payment order does not belong to this account.' });
-        }
-
-        if (!verifyRazorpaySignature(orderId, paymentId, signature)) {
-            return res.status(400).json({ success: false, message: 'Invalid Razorpay payment signature.' });
-        }
-
-        if (orderData.status === 'paid') {
-            return res.json({
-                success: true,
-                alreadyProcessed: true,
-                planType: orderData.planType || PLAN_TYPE_NONE,
-                message: 'Payment already processed.'
-            });
-        }
+        if (normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
+        if (!verifyRazorpaySignature(orderId, paymentId, signature)) return res.status(400).json({ success: false, message: 'Invalid signature.' });
+        if (orderData.status === 'paid') return res.json({ success: true, alreadyProcessed: true, planType: orderData.planType || PLAN_TYPE_NONE, message: 'Payment already processed.' });
 
         const razorpay = getRazorpay();
         const payment = await razorpay.payments.fetch(paymentId);
-
-        if (String(payment.order_id || '') !== orderId) {
-            return res.status(400).json({ success: false, message: 'Payment/order mismatch.' });
+        if (String(payment.order_id || '') !== orderId || String(payment.status || '').toLowerCase() !== 'captured') {
+            return res.status(400).json({ success: false, message: `Payment not captured. Status: ${payment.status}` });
         }
-
-        if (String(payment.status || '').toLowerCase() !== 'captured') {
-            return res.status(400).json({
-                success: false,
-                message: `Payment is not captured yet. Current status: ${payment.status || 'unknown'}`
-            });
-        }
-
-        const paidPaise = Number(payment.amount || 0);
-
-        if (paidPaise !== Number(orderData.amountPaise || 0)) {
-            return res.status(400).json({ success: false, message: 'Payment amount mismatch.' });
-        }
+        if (Number(payment.amount || 0) !== Number(orderData.amountPaise || 0)) return res.status(400).json({ success: false, message: 'Payment amount mismatch.' });
 
         const planType = String(orderData.planType || '').toUpperCase();
         const planDurationMs = Number(orderData.planDurationMs || 0);
-
-        if (!VALID_PLAN_TYPES.includes(planType)) {
-            return res.status(400).json({ success: false, message: 'Invalid plan type in order.' });
-        }
-        if (planDurationMs <= 0) {
-            return res.status(400).json({ success: false, message: 'Invalid plan duration in order.' });
-        }
+        if (!VALID_PLAN_TYPES.includes(planType) || planDurationMs <= 0) return res.status(400).json({ success: false, message: 'Invalid plan data.' });
 
         const userRef = db.collection('users').doc(phone);
         let newPlanExpiry = 0;
@@ -1705,60 +1571,28 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
         await db.runTransaction(async transaction => {
             const freshOrder = await transaction.get(orderRef);
             const freshUser = await transaction.get(userRef);
+            if (!freshUser.exists) throw new Error('Driver account not found.');
 
-            if (!freshUser.exists) {
-                const error = new Error('Driver account not found.');
-                error.statusCode = 404;
-                throw error;
-            }
-
-            const freshOrderData = freshOrder.data() || {};
-
-            if (freshOrderData.status === 'paid') {
+            if (freshOrder.data()?.status === 'paid') {
                 newPlanExpiry = Number(freshUser.data()?.planExpiry || 0);
                 return;
             }
 
             const now = Date.now();
             const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
-            const baseTime = currentExpiry > now ? currentExpiry : now;
-            newPlanExpiry = baseTime + planDurationMs;
+            newPlanExpiry = (currentExpiry > now ? currentExpiry : now) + planDurationMs;
 
-            transaction.update(userRef, {
-                activePlan: planType,
-                planExpiry: newPlanExpiry,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            transaction.update(orderRef, {
-                status: 'paid',
-                paymentId: paymentId,
-                signature: signature,
-                activatedPlan: planType,
-                planExpiry: newPlanExpiry,
-                paidAt: admin.firestore.FieldValue.serverTimestamp()
-            });
+            transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+            transaction.update(orderRef, { status: 'paid', paymentId: paymentId, signature: signature, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
         });
 
         return res.json({
-            success: true,
-            alreadyProcessed: false,
-            planType: planType,
-            planExpiry: newPlanExpiry,
-            planExpiryIso: new Date(newPlanExpiry).toISOString(),
-            message: `${planType} plan activated successfully.`
+            success: true, alreadyProcessed: false, planType: planType, planExpiry: newPlanExpiry,
+            planExpiryIso: new Date(newPlanExpiry).toISOString(), message: `${planType} plan activated successfully.`
         });
     } catch (error) {
-        console.error('RAZORPAY VERIFY ERROR:', error);
-        return res.status(error.statusCode || 500).json({
-            success: false,
-            message: error.message || 'Unable to verify Razorpay payment.'
-        });
+        return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' });
     }
 });
-
-// ============================================================
-// VERCEL SERVERLESS ENTRYPOINT
-// ============================================================
 
 module.exports = app;
