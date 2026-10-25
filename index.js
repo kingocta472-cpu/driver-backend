@@ -535,11 +535,12 @@ async function decodeFirebaseToken(req) {
     return admin.auth().verifyIdToken(idToken);
 }
 
-// ✅ NAYA: App Check Middleware
+// ✅ NAYA: App Check Middleware (With detailed logging)
 async function verifyAppCheck(req, res, next) {
     const appCheckToken = req.headers['x-firebase-appcheck'];
 
     if (!appCheckToken) {
+        console.error('APP CHECK ERROR: Missing token in request headers.');
         return res.status(403).json({ success: false, message: 'Access Denied: Missing App Check Token.' });
     }
 
@@ -548,7 +549,7 @@ async function verifyAppCheck(req, res, next) {
         await admin.appCheck().verifyToken(appCheckToken);
         next();
     } catch (error) {
-        console.error('APP CHECK ERROR:', error);
+        console.error('APP CHECK ERROR DETAILS:', error.message);
         return res.status(403).json({ success: false, message: 'Access Denied: Invalid App Check Token.' });
     }
 }
@@ -973,11 +974,8 @@ app.get('/api/test', (req, res) => {
 // LOGIN / REGISTER ✅ APP CHECK VERIFIED
 // ============================================================
 
-// ✅ FIXED: Ab yahan verifyFirebaseIdentity ki jagah verifyAppCheck laga hai
 app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
     try {
-        // Removed the Anonymous Check because we now rely on App Check
-
         const phone = normalizePhone(req.body.phone);
         const pin = String(req.body.pin || '').trim();
         const referralCode = normalizeReferralCode(req.body.referralCode);
