@@ -12,7 +12,7 @@ const redis = new Redis({
     token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 });
 
-// ✅ UPDATED CORS: App Check header ko allow karne ke liye
+// ✅ UPDATED CORS
 app.use(cors({
     origin: '*',
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Firebase-AppCheck']
@@ -22,57 +22,38 @@ app.use(express.json());
 // ============================================================
 // DRIVER ACTIVITY TRACKER - INLINE
 // ============================================================
-
 const TRACKER_COLLECTION = 'driverActivity';
 const TRACKER_WRITE_INTERVAL_MS = 5 * 60 * 1000;
 
 let trackerCache = global.driverRidePickerTrackerCache;
-
 if (!trackerCache) {
-    trackerCache = global.driverRidePickerTrackerCache = {
-        lastWriteByDriver: new Map()
-    };
+    trackerCache = global.driverRidePickerTrackerCache = { lastWriteByDriver: new Map() };
 }
 
-function trackerHashPhone(phone) {
-    return crypto.createHash('sha256').update(`driver-ride-picker-tracker:${phone}`).digest('hex');
-}
-
+function trackerHashPhone(phone) { return crypto.createHash('sha256').update(`driver-ride-picker-tracker:${phone}`).digest('hex'); }
 function trackerMaskPhone(phone) {
     const normalized = normalizePhone(phone);
-    if (!normalized) {
-        return '**********';
-    }
+    if (!normalized) return '**********';
     return normalized.slice(0, 2) + '******' + normalized.slice(-2);
 }
-
 function trackerShouldWrite(driverKey) {
     const now = Date.now();
     const lastWrite = trackerCache.lastWriteByDriver.get(driverKey) || 0;
-    if (now - lastWrite < TRACKER_WRITE_INTERVAL_MS) {
-        return false;
-    }
+    if (now - lastWrite < TRACKER_WRITE_INTERVAL_MS) return false;
     trackerCache.lastWriteByDriver.set(driverKey, now);
     if (trackerCache.lastWriteByDriver.size > 5000) {
         const cutoff = now - TRACKER_WRITE_INTERVAL_MS * 2;
         for (const [key, timestamp] of trackerCache.lastWriteByDriver) {
-            if (timestamp < cutoff) {
-                trackerCache.lastWriteByDriver.delete(key);
-            }
+            if (timestamp < cutoff) trackerCache.lastWriteByDriver.delete(key);
         }
     }
     return true;
 }
-
 async function recordDriverActivity({ phone, uid, method, endpoint }) {
     const normalizedPhone = normalizePhone(phone);
-    if (!normalizedPhone) {
-        return;
-    }
+    if (!normalizedPhone) return;
     const driverKey = trackerHashPhone(normalizedPhone);
-    if (!trackerShouldWrite(driverKey)) {
-        return;
-    }
+    if (!trackerShouldWrite(driverKey)) return;
     try {
         const db = getDB();
         await db.collection(TRACKER_COLLECTION).doc(driverKey).set({
@@ -84,60 +65,38 @@ async function recordDriverActivity({ phone, uid, method, endpoint }) {
             lastEndpoint: String(endpoint || '').slice(0, 200),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
-    } catch (error) {
-        console.error('DRIVER ACTIVITY TRACKER WRITE ERROR:', error);
-    }
+    } catch (error) { console.error('DRIVER ACTIVITY TRACKER WRITE ERROR:', error); }
 }
-
 function verifyTrackerAdminKey(req) {
     const configuredKey = String(process.env.TRACKER_ADMIN_KEY || '');
     const suppliedKey = String(req.headers['x-tracker-admin-key'] || '');
-    if (!configuredKey || !suppliedKey) {
-        return false;
-    }
+    if (!configuredKey || !suppliedKey) return false;
     const expected = Buffer.from(configuredKey, 'utf8');
     const supplied = Buffer.from(suppliedKey, 'utf8');
-    if (expected.length !== supplied.length) {
-        return false;
-    }
+    if (expected.length !== supplied.length) return false;
     return crypto.timingSafeEqual(expected, supplied);
 }
-
 function getTrackerStatus(lastSeenMs) {
     const age = Date.now() - lastSeenMs;
-    if (age <= 5 * 60 * 1000) {
-        return 'active';
-    }
-    if (age <= 15 * 60 * 1000) {
-        return 'recent';
-    }
+    if (age <= 5 * 60 * 1000) return 'active';
+    if (age <= 15 * 60 * 1000) return 'recent';
     return 'inactive';
 }
-
 function trackerTimestampToIso(timestamp) {
-    if (!timestamp) {
-        return null;
-    }
-    if (typeof timestamp.toDate === 'function') {
-        return timestamp.toDate().toISOString();
-    }
+    if (!timestamp) return null;
+    if (typeof timestamp.toDate === 'function') return timestamp.toDate().toISOString();
     return null;
 }
-
 async function getDriverTrackerSnapshot() {
     const db = getDB();
     const now = Date.now();
     const activeCutoff = now - 5 * 60 * 1000;
     const recentCutoff = now - 15 * 60 * 1000;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
 
     const usersSnapshot = await db.collection('users').count().get();
     const activitySnapshot = await db.collection(TRACKER_COLLECTION).orderBy('lastSeenAt', 'desc').limit(200).get();
-
-    let activeNow = 0;
-    let active15Min = 0;
-    let activeToday = 0;
+    let activeNow = 0, active15Min = 0, activeToday = 0;
     const drivers = [];
 
     activitySnapshot.forEach(doc => {
@@ -145,17 +104,9 @@ async function getDriverTrackerSnapshot() {
         const lastSeen = data.lastSeenAt;
         const lastSeenMs = lastSeen && typeof lastSeen.toMillis === 'function' ? lastSeen.toMillis() : 0;
         const status = lastSeenMs ? getTrackerStatus(lastSeenMs) : 'inactive';
-
-        if (lastSeenMs >= activeCutoff) {
-            activeNow++;
-        }
-        if (lastSeenMs >= recentCutoff) {
-            active15Min++;
-        }
-        if (lastSeenMs >= today.getTime()) {
-            activeToday++;
-        }
-
+        if (lastSeenMs >= activeCutoff) activeNow++;
+        if (lastSeenMs >= recentCutoff) active15Min++;
+        if (lastSeenMs >= today.getTime()) activeToday++;
         drivers.push({
             driverId: String(data.driverId || doc.id),
             phone: String(data.phoneMasked || '**********'),
@@ -167,57 +118,31 @@ async function getDriverTrackerSnapshot() {
     });
 
     return {
-        success: true,
-        generatedAt: new Date().toISOString(),
-        summary: {
-            totalDrivers: Number(usersSnapshot.data().count || 0),
-            activeNow: activeNow,
-            active15Min: active15Min,
-            activeToday: activeToday
-        },
+        success: true, generatedAt: new Date().toISOString(),
+        summary: { totalDrivers: Number(usersSnapshot.data().count || 0), activeNow, active15Min, activeToday },
         drivers: drivers
     };
 }
-
 async function handleDriverTrackerAdmin(req, res) {
-    if (!verifyTrackerAdminKey(req)) {
-        return res.status(401).json({
-            success: false,
-            message: 'Unauthorized tracker access.'
-        });
-    }
-
-    try {
-        const data = await getDriverTrackerSnapshot();
-        return res.json(data);
-    } catch (error) {
-        console.error('TRACKER SNAPSHOT ERROR:', error);
-        return res.status(500).json({
-            success: false,
-            message: 'Unable to load driver activity tracker.'
-        });
-    }
+    if (!verifyTrackerAdminKey(req)) return res.status(401).json({ success: false, message: 'Unauthorized tracker access.' });
+    try { return res.json(await getDriverTrackerSnapshot()); } 
+    catch (error) { return res.status(500).json({ success: false, message: 'Unable to load driver activity tracker.' }); }
 }
 
 // ============================================================
-// CONFIG ✅ NAYA: TIME BASED SYSTEM
+// CONFIG ✅ TIME BASED SYSTEM
 // ============================================================
-
-const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000; 
-const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000; 
+const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000;
+const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000;
 
 const DAILY_PLAN_AMOUNT = 15;
 const DAILY_PLAN_DURATION_MS = 24 * 60 * 60 * 1000;
-
 const THREE_DAYS_PLAN_AMOUNT = 39;
 const THREE_DAYS_PLAN_DURATION_MS = 3 * 24 * 60 * 60 * 1000;
-
 const WEEKLY_PLAN_AMOUNT = 99;
 const WEEKLY_PLAN_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
-
 const FIFTEEN_DAYS_PLAN_AMOUNT = 175;
 const FIFTEEN_DAYS_PLAN_DURATION_MS = 15 * 24 * 60 * 60 * 1000;
-
 const MONTHLY_PLAN_AMOUNT = 299;
 const MONTHLY_PLAN_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -236,55 +161,28 @@ const PLAN_CONFIG_BY_AMOUNT = {
     [MONTHLY_PLAN_AMOUNT]: { type: PLAN_TYPE_MONTHLY, durationMs: MONTHLY_PLAN_DURATION_MS, label: 'Monthly' }
 };
 
-const VALID_PLAN_TYPES = [
-    PLAN_TYPE_DAILY,
-    PLAN_TYPE_THREE_DAYS,
-    PLAN_TYPE_WEEKLY,
-    PLAN_TYPE_FIFTEEN_DAYS,
-    PLAN_TYPE_MONTHLY
-];
+const VALID_PLAN_TYPES = [PLAN_TYPE_DAILY, PLAN_TYPE_THREE_DAYS, PLAN_TYPE_WEEKLY, PLAN_TYPE_FIFTEEN_DAYS, PLAN_TYPE_MONTHLY];
 
 const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ============================================================
-// APP UPDATE CONFIGURATION ✅ UPDATED LINK & VERSION
-// ============================================================
 const APP_LATEST_VERSION = '1.15.0';
 const APP_MINIMUM_VERSION = '1.15.0';
 const APP_APK_URL = 'https://driver-ride-picker-website.vercel.app/'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version install karein.';
 const APP_RELEASE_NOTES = '24 Hours Free Trial, +3 Hours Referral Bonus, Smart Ola/Uber Auto-Accept Fix, Time-based plans';
-const APP_PUBLISHED_AT = '';
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-// ============================================================
-// TRIAL SECURITY
-// ============================================================
 const TRIAL_IP_LIMIT = 999999;
 const TRIAL_IP_WINDOW_SECONDS = 86400;
 
-const FAKE_PHONE_PATTERNS = [
-    /^(\d)\1{9}$/,
-    /^9999\d{6}$/,
-    /^1234\d{6}$/,
-    /^(\d{2})\1{4}$/,
-    /^9876\d{6}$/,
-    /^0000\d{6}$/,
-];
-
-function isFakePhone(phone) {
-    return FAKE_PHONE_PATTERNS.some(p => p.test(phone));
-}
-
-// ============================================================
-// RIDE BOT CONFIG VERSION (REDIS-BACKED)
-// ============================================================
+const FAKE_PHONE_PATTERNS = [ /^(\d)\1{9}$/, /^9999\d{6}$/, /^1234\d{6}$/, /^(\d{2})\1{4}$/, /^9876\d{6}$/, /^0000\d{6}$/ ];
+function isFakePhone(phone) { return FAKE_PHONE_PATTERNS.some(p => p.test(phone)); }
 
 const RIDE_BOT_CONFIG_VERSION_FALLBACK = Number(process.env.RIDE_BOT_CONFIG_VERSION || 3);
 const RIDE_BOT_CONFIG_VERSION_KEY = 'ride-bot-config-version';
@@ -293,65 +191,53 @@ async function getRideBotConfigVersion() {
     try {
         const fromRedis = await redis.get(RIDE_BOT_CONFIG_VERSION_KEY);
         const parsed = Number(fromRedis);
-        if (Number.isFinite(parsed) && parsed > 0) {
-            return parsed;
-        }
-    } catch (error) {
-        console.error('CONFIG VERSION REDIS READ ERROR:', error);
-    }
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    } catch (error) { console.error('CONFIG VERSION REDIS READ ERROR:', error); }
     return RIDE_BOT_CONFIG_VERSION_FALLBACK;
 }
 
 function verifyAdminToken(req) {
     const expectedToken = String(process.env.ADMIN_TOKEN || '');
     const authHeader = String(req.headers.authorization || '');
-    if (!expectedToken || !authHeader) {
-        return false;
-    }
+    if (!expectedToken || !authHeader) return false;
     return authHeader === `Bearer ${expectedToken}`;
 }
 
 // ============================================================
-// FIREBASE INIT
+// FIREBASE INIT (FINAL FIX)
 // ============================================================
-
 let cached = global.firebaseCache;
-
-if (!cached) {
-    cached = global.firebaseCache = { db: null };
-}
+if (!cached) cached = global.firebaseCache = { db: null };
 
 function initializeFirebaseAdmin() {
-    if (admin.apps.length > 0) {
+    if (admin.apps.length > 0) return admin;
+
+    // ✅ NAYA FIX: Ab hum ek hi JSON variable use kar rahe hain
+    const serviceAccountRaw = process.env.FIREBASE_SERVICE_ACCOUNT_KEY;
+    
+    if (!serviceAccountRaw) {
+        throw new Error('FIREBASE_SERVICE_ACCOUNT_KEY is missing in Vercel Environment Variables.');
+    }
+
+    try {
+        const serviceAccount = JSON.parse(serviceAccountRaw);
+        // Private key me newline format fix kar rahe hain
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+
         return admin;
+    } catch (error) {
+        console.error('FIREBASE INIT ERROR:', error);
+        throw new Error('Failed to initialize Firebase Admin. Check JSON format.');
     }
-
-    const projectId = process.env.FIREBASE_PROJECT_ID;
-    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
-    const privateKeyRaw = process.env.FIREBASE_PRIVATE_KEY;
-
-    if (!projectId || !clientEmail || !privateKeyRaw) {
-        throw new Error('Firebase Admin credentials are missing. Add FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and FIREBASE_PRIVATE_KEY in Vercel Environment Variables.');
-    }
-
-    const privateKey = String(privateKeyRaw).replace(/\\n/g, '\n');
-
-    admin.initializeApp({
-        credential: admin.credential.cert({
-            projectId: projectId,
-            clientEmail: clientEmail,
-            privateKey: privateKey
-        })
-    });
-
-    return admin;
 }
 
 function getDB() {
     initializeFirebaseAdmin();
-    if (cached.db) {
-        return cached.db;
-    }
+    if (cached.db) return cached.db;
     cached.db = admin.firestore();
     return cached.db;
 }
@@ -359,191 +245,94 @@ function getDB() {
 // ============================================================
 // RAZORPAY INIT
 // ============================================================
-
 function getRazorpay() {
     const keyId = process.env.RAZORPAY_KEY_ID;
     const keySecret = process.env.RAZORPAY_KEY_SECRET;
-
-    if (!keyId || !keySecret) {
-        throw new Error('Razorpay keys are missing. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Vercel Environment Variables.');
-    }
-
-    return new Razorpay({
-        key_id: keyId,
-        key_secret: keySecret
-    });
+    if (!keyId || !keySecret) throw new Error('Razorpay keys are missing. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Vercel Environment Variables.');
+    return new Razorpay({ key_id: keyId, key_secret: keySecret });
 }
 
 // ============================================================
 // HELPERS
 // ============================================================
-
 function normalizePhone(phone) {
-    if (!phone) {
-        return '';
-    }
+    if (!phone) return '';
     const digits = String(phone).trim().replace(/\D/g, '');
-    if (digits.length === 10 && /^[6-9]/.test(digits)) {
-        return digits;
-    }
-    if (digits.length === 12 && digits.startsWith('91') && /^[6-9]/.test(digits.slice(2))) {
-        return digits.slice(2);
-    }
+    if (digits.length === 10 && /^[6-9]/.test(digits)) return digits;
+    if (digits.length === 12 && digits.startsWith('91') && /^[6-9]/.test(digits.slice(2))) return digits.slice(2);
     return '';
 }
-
-function normalizeInstallId(installId) {
-    if (!installId) {
-        return '';
-    }
-    return String(installId).trim().slice(0, INSTALL_ID_MAX_LENGTH);
-}
-
-function normalizeReferralCode(code) {
-    if (!code) {
-        return '';
-    }
-    return String(code).trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-}
-
-function isValidPin(pin) {
-    return new RegExp(`^\\d{${PIN_LENGTH}}$`).test(String(pin || '').trim());
-}
-
-function isPlanActive(userData) {
-    if (!userData) return false;
-    const expiry = Number(userData.planExpiry || 0);
-    return expiry > Date.now();
-}
-
-function getActivePlanType(userData) {
-    if (!userData) return PLAN_TYPE_NONE;
-    if (isPlanActive(userData)) {
-        return String(userData.activePlan || PLAN_TYPE_NONE);
-    }
-    return PLAN_TYPE_NONE;
-}
+function normalizeInstallId(installId) { return installId ? String(installId).trim().slice(0, INSTALL_ID_MAX_LENGTH) : ''; }
+function normalizeReferralCode(code) { return code ? String(code).trim().toUpperCase().replace(/[^A-Z0-9]/g, '') : ''; }
+function isValidPin(pin) { return new RegExp(`^\\d{${PIN_LENGTH}}$`).test(String(pin || '').trim()); }
+function isPlanActive(userData) { return userData && Number(userData.planExpiry || 0) > Date.now(); }
+function getActivePlanType(userData) { return isPlanActive(userData) ? String(userData.activePlan || PLAN_TYPE_NONE) : PLAN_TYPE_NONE; }
 
 function parseVersion(version) {
     const cleaned = String(version || '').trim().replace(/^v/i, '');
-    if (!/^\d+(?:\.\d+){0,3}$/.test(cleaned)) {
-        return null;
-    }
+    if (!/^\d+(?:\.\d+){0,3}$/.test(cleaned)) return null;
     return cleaned.split('.').map(part => Number(part));
 }
-
 function compareVersions(left, right) {
-    const a = parseVersion(left);
-    const b = parseVersion(right);
-    if (!a || !b) {
-        return null;
-    }
+    const a = parseVersion(left); const b = parseVersion(right);
+    if (!a || !b) return null;
     const length = Math.max(a.length, b.length);
     for (let i = 0; i < length; i++) {
-        const av = a[i] || 0;
-        const bv = b[i] || 0;
-        if (av > bv) return 1;
-        if (av < bv) return -1;
+        const av = a[i] || 0; const bv = b[i] || 0;
+        if (av > bv) return 1; if (av < bv) return -1;
     }
     return 0;
 }
-
 function generateReferralCode() {
     const bytes = crypto.randomBytes(REFERRAL_CODE_LENGTH);
     let code = '';
-    for (let i = 0; i < REFERRAL_CODE_LENGTH; i++) {
-        code += REFERRAL_CODE_ALPHABET[bytes[i] % REFERRAL_CODE_ALPHABET.length];
-    }
+    for (let i = 0; i < REFERRAL_CODE_LENGTH; i++) code += REFERRAL_CODE_ALPHABET[bytes[i] % REFERRAL_CODE_ALPHABET.length];
     return code;
 }
-
 function createPinHash(pin) {
     const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.scryptSync(String(pin).trim(), salt, 64, {
-        N: 16384,
-        r: 8,
-        p: 1,
-        maxmem: 32 * 1024 * 1024
-    }).toString('hex');
+    const hash = crypto.scryptSync(String(pin).trim(), salt, 64, { N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 }).toString('hex');
     return { pinSalt: salt, pinHash: hash };
 }
-
 function verifyPinHash(pin, salt, expectedHash) {
-    if (!isValidPin(pin) || !salt || !expectedHash) {
-        return false;
-    }
+    if (!isValidPin(pin) || !salt || !expectedHash) return false;
     try {
-        const actual = crypto.scryptSync(String(pin).trim(), String(salt), 64, {
-            N: 16384,
-            r: 8,
-            p: 1,
-            maxmem: 32 * 1024 * 1024
-        });
+        const actual = crypto.scryptSync(String(pin).trim(), String(salt), 64, { N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 });
         const expected = Buffer.from(String(expectedHash), 'hex');
         return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
-    } catch (error) {
-        console.error('PIN VERIFY ERROR:', error);
-        return false;
-    }
+    } catch (error) { return false; }
 }
-
-function hashInstallId(installId) {
-    return crypto.createHash('sha256').update(`driver-ride-picker-install:${installId}`).digest('hex');
-}
-
-function hashPhoneForAuth(phone) {
-    return crypto.createHash('sha256').update(`driver-ride-picker-auth:${phone}`).digest('hex');
-}
-
+function hashInstallId(installId) { return crypto.createHash('sha256').update(`driver-ride-picker-install:${installId}`).digest('hex'); }
+function hashPhoneForAuth(phone) { return crypto.createHash('sha256').update(`driver-ride-picker-auth:${phone}`).digest('hex'); }
 function generateDriverFirebaseUid(phone) {
     const projectId = process.env.FIREBASE_PROJECT_ID || 'driver-ride-picker';
     const digest = crypto.createHash('sha256').update(`driver:${projectId}:${phone}`).digest('hex');
     return `driver_${digest}`;
 }
-
-function generateReceipt() {
-    const randomPart = crypto.randomBytes(6).toString('hex');
-    return `drp_${Date.now()}_${randomPart}`.slice(0, 40);
-}
-
+function generateReceipt() { return `drp_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`.slice(0, 40); }
 function verifyRazorpaySignature(orderId, paymentId, signature) {
     const secret = process.env.RAZORPAY_KEY_SECRET;
-    if (!secret) {
-        throw new Error('Razorpay secret is not configured.');
-    }
+    if (!secret) throw new Error('Razorpay secret is not configured.');
     const generated = crypto.createHmac('sha256', secret).update(`${orderId}|${paymentId}`).digest('hex');
-    if (!signature || generated.length !== signature.length) {
-        return false;
-    }
+    if (!signature || generated.length !== signature.length) return false;
     return crypto.timingSafeEqual(Buffer.from(generated, 'utf8'), Buffer.from(signature, 'utf8'));
 }
 
 async function decodeFirebaseToken(req) {
     const authorization = String(req.headers.authorization || '');
-    if (!authorization.startsWith('Bearer ')) {
-        const error = new Error('Firebase authentication token required.');
-        error.statusCode = 401;
-        throw error;
-    }
+    if (!authorization.startsWith('Bearer ')) { const error = new Error('Firebase authentication token required.'); error.statusCode = 401; throw error; }
     const idToken = authorization.substring(7).trim();
-    if (!idToken) {
-        const error = new Error('Firebase authentication token required.');
-        error.statusCode = 401;
-        throw error;
-    }
+    if (!idToken) { const error = new Error('Firebase authentication token required.'); error.statusCode = 401; throw error; }
     initializeFirebaseAdmin();
     return admin.auth().verifyIdToken(idToken);
 }
 
-// ✅ NAYA: App Check Middleware (With detailed logging)
 async function verifyAppCheck(req, res, next) {
     const appCheckToken = req.headers['x-firebase-appcheck'];
-
     if (!appCheckToken) {
         console.error('APP CHECK ERROR: Missing token in request headers.');
         return res.status(403).json({ success: false, message: 'Access Denied: Missing App Check Token.' });
     }
-
     try {
         initializeFirebaseAdmin();
         await admin.appCheck().verifyToken(appCheckToken);
@@ -554,370 +343,159 @@ async function verifyAppCheck(req, res, next) {
     }
 }
 
-// ✅ UPDATED: Purane token wale routes ke liye (Baaki API endpoints jo user login ke baad use karte hain)
 async function verifyFirebaseToken(req, res, next) {
     try {
         const decoded = await decodeFirebaseToken(req);
-        if (!decoded.uid) {
-            return res.status(401).json({ success: false, message: 'Invalid Firebase user.' });
-        }
+        if (!decoded.uid) return res.status(401).json({ success: false, message: 'Invalid Firebase user.' });
         const db = getDB();
         const snapshot = await db.collection('users').where('firebaseUid', '==', decoded.uid).limit(1).get();
-        if (snapshot.empty) {
-            return res.status(401).json({ success: false, message: 'Driver account authentication required.' });
-        }
+        if (snapshot.empty) return res.status(401).json({ success: false, message: 'Driver account authentication required.' });
         const userDoc = snapshot.docs[0];
         const userData = userDoc.data() || {};
-        req.firebaseUser = {
-            uid: decoded.uid,
-            phone: normalizePhone(userData.phone || userDoc.id),
-            decodedToken: decoded,
-            userData: userData
-        };
+        req.firebaseUser = { uid: decoded.uid, phone: normalizePhone(userData.phone || userDoc.id), decodedToken: decoded, userData };
         req.driverUser = userData;
 
-        try {
-            Promise.resolve(recordDriverActivity({
-                phone: req.firebaseUser.phone,
-                uid: req.firebaseUser.uid,
-                method: req.method,
-                endpoint: req.originalUrl
-            })).catch(trackerError => console.error('DRIVER ACTIVITY TRACKER ERROR:', trackerError));
-        } catch (trackerError) {
-            console.error('DRIVER ACTIVITY TRACKER ERROR:', trackerError);
-        }
-
+        try { Promise.resolve(recordDriverActivity({ phone: req.firebaseUser.phone, uid: req.firebaseUser.uid, method: req.method, endpoint: req.originalUrl })).catch(trackerError => console.error('TRACKER ERROR:', trackerError)); } catch (trackerError) { console.error('TRACKER ERROR:', trackerError); }
         next();
     } catch (error) {
         console.error('FIREBASE TOKEN ERROR:', error);
-        return res.status(401).json({
-            success: false,
-            message: error.message || 'Invalid or expired Firebase authentication token.'
-        });
+        return res.status(401).json({ success: false, message: error.message || 'Invalid or expired Firebase authentication token.' });
     }
 }
 
-function getAuthenticatedPhone(req) {
-    return normalizePhone(req.firebaseUser?.phone || '');
-}
-
+function getAuthenticatedPhone(req) { return normalizePhone(req.firebaseUser?.phone || ''); }
 function phoneMatchesAuthenticatedUser(req, suppliedPhone) {
-    const authenticatedPhone = getAuthenticatedPhone(req);
-    const phone = normalizePhone(suppliedPhone);
+    const authenticatedPhone = getAuthenticatedPhone(req); const phone = normalizePhone(suppliedPhone);
     return Boolean(authenticatedPhone && phone && authenticatedPhone === phone);
 }
-
 async function getPinLockState(db, phone) {
     const ref = db.collection('authAttempts').doc(hashPhoneForAuth(phone));
     const snapshot = await ref.get();
-    if (!snapshot.exists) {
-        return { locked: false, lockedUntilMs: 0 };
-    }
+    if (!snapshot.exists) return { locked: false, lockedUntilMs: 0 };
     const data = snapshot.data() || {};
     const lockedUntilMs = Number(data.lockedUntilMs || 0);
-    return {
-        locked: lockedUntilMs > Date.now(),
-        lockedUntilMs: lockedUntilMs
-    };
+    return { locked: lockedUntilMs > Date.now(), lockedUntilMs };
 }
-
 async function recordPinFailure(db, phone) {
     const ref = db.collection('authAttempts').doc(hashPhoneForAuth(phone));
     let result = { failures: 1, locked: false, lockedUntilMs: 0 };
-
     await db.runTransaction(async transaction => {
         const snapshot = await transaction.get(ref);
         const data = snapshot.exists ? (snapshot.data() || {}) : {};
         const now = Date.now();
         const existingLockUntil = Number(data.lockedUntilMs || 0);
-
-        if (existingLockUntil > now) {
-            result = {
-                failures: Number(data.failures || 0),
-                locked: true,
-                lockedUntilMs: existingLockUntil
-            };
-            return;
-        }
-
+        if (existingLockUntil > now) { result = { failures: Number(data.failures || 0), locked: true, lockedUntilMs: existingLockUntil }; return; }
         const failures = Number(data.failures || 0) + 1;
         const locked = failures >= PIN_MAX_ATTEMPTS;
         const lockedUntilMs = locked ? (now + PIN_LOCK_MINUTES * 60 * 1000) : 0;
-
-        transaction.set(ref, {
-            failures: failures,
-            lockedUntilMs: lockedUntilMs,
-            lastFailedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-
-        result = {
-            failures: failures,
-            locked: locked,
-            lockedUntilMs: lockedUntilMs
-        };
+        transaction.set(ref, { failures, lockedUntilMs, lastFailedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+        result = { failures, locked, lockedUntilMs };
     });
-
     return result;
 }
-
-async function clearPinFailures(db, phone) {
-    await db.collection('authAttempts').doc(hashPhoneForAuth(phone)).delete();
-}
+async function clearPinFailures(db, phone) { await db.collection('authAttempts').doc(hashPhoneForAuth(phone)).delete(); }
 
 async function createUniqueReferralCode(db, userRef) {
     for (let attempt = 0; attempt < 10; attempt++) {
         const code = generateReferralCode();
         const codeRef = db.collection('referralCodes').doc(code);
         const existing = await codeRef.get();
-        if (existing.exists) {
-            continue;
-        }
-
+        if (existing.exists) continue;
         try {
             await db.runTransaction(async transaction => {
                 const freshCode = await transaction.get(codeRef);
-                if (freshCode.exists) {
-                    throw new Error('REFERRAL_CODE_COLLISION');
-                }
-                transaction.set(codeRef, {
-                    code: code,
-                    userId: userRef.id,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp()
-                });
+                if (freshCode.exists) throw new Error('REFERRAL_CODE_COLLISION');
+                transaction.set(codeRef, { code, userId: userRef.id, createdAt: admin.firestore.FieldValue.serverTimestamp() });
             });
             return code;
-        } catch (error) {
-            if (error.message !== 'REFERRAL_CODE_COLLISION') {
-                throw error;
-            }
-        }
+        } catch (error) { if (error.message !== 'REFERRAL_CODE_COLLISION') throw error; }
     }
-
     throw new Error('Unable to generate unique referral code.');
 }
 
 // ============================================================
-// HOME
+// ROUTES
 // ============================================================
-
-app.get('/', (req, res) => {
-    res.send('Driver Ride Picker Backend is Running!');
-});
-
-// ============================================================
-// APP UPDATE STATUS
-// ============================================================
+app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!'); });
 
 app.get('/api/app/update', (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-        res.set('Pragma', 'no-cache');
-        res.set('Expires', '0');
-
+        res.set('Pragma', 'no-cache'); res.set('Expires', '0');
         const currentVersion = String(req.query.currentVersion || '').trim();
         const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
         const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
-        
         const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
         const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
-
         return res.json({
-            success: true,
-            latestVersion: APP_LATEST_VERSION,
-            minimumVersion: APP_MINIMUM_VERSION,
-            forceUpdate: forceUpdate,
-            updateMessage: APP_UPDATE_MESSAGE,
-            downloadUrl: APP_APK_URL,
-            updateAvailable: updateAvailable,
-            apkUrl: APP_APK_URL,
-            message: APP_UPDATE_MESSAGE,
-            title: APP_UPDATE_TITLE,
-            releaseNotes: APP_RELEASE_NOTES,
-            currentVersion: currentVersion || null
+            success: true, latestVersion: APP_LATEST_VERSION, minimumVersion: APP_MINIMUM_VERSION,
+            forceUpdate, updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
+            updateAvailable, apkUrl: APP_APK_URL, message: APP_UPDATE_MESSAGE,
+            title: APP_UPDATE_TITLE, releaseNotes: APP_RELEASE_NOTES, currentVersion: currentVersion || null
         });
-    } catch (error) {
-        console.error('APP UPDATE STATUS ERROR:', error);
-        return res.status(500).json({
-            success: false,
-            message: 'Unable to check app update status.'
-        });
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to check app update status.' }); }
 });
-
-// ============================================================
-// RIDE BOT CONFIG API (REDIS-BACKED VERSION)
-// ============================================================
 
 app.get('/api/config/ride-bot', async (req, res) => {
     res.setHeader('Cache-Control', 's-maxage=30, stale-while-revalidate=60');
     res.setHeader('Access-Control-Allow-Origin', '*');
-
     try {
         const version = await getRideBotConfigVersion();
-
         res.status(200).json({
-            version: version,
-            updatedAt: new Date().toISOString(),
+            version, updatedAt: new Date().toISOString(),
             platforms: {
-                Uber: {
-                    accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"],
-                    success_signals: [
-                        "start ride","go to pickup","going to pickup","picking up",
-                        "pick up location","navigate","pickup","confirm otp","enter otp",
-                        "verify otp","otp","arrived","reached","waiting","trip started",
-                        "start trip","rider details","customer details","driver details",
-                        "you have accepted","ride accepted","accepted the ride",
-                        "you're on your way","on the way"
-                    ],
-                    view_id_patterns: ["accept", "match", "confirm"]
-                },
-                Ola: {
-                    accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"],
-                    success_signals: [
-                        "start ride","go to pickup","going to pickup","picking up",
-                        "pick up location","otp submit","navigate","pickup","confirm otp",
-                        "enter otp","verify otp","otp","arrived","reached","waiting",
-                        "trip started","start trip","rider details","customer details",
-                        "driver details","you have accepted","ride accepted",
-                        "accepted the ride","you're on your way","on the way"
-                    ],
-                    view_id_patterns: ["accept", "confirm"]
-                },
-                Rapido: {
-                    accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"],
-                    success_signals: [
-                        "start ride","go to pickup","going to pickup","picking up",
-                        "pick up location","client located","navigate","pickup",
-                        "confirm otp","enter otp","verify otp","otp","arrived","reached",
-                        "waiting","trip started","start trip","rider details",
-                        "customer details","driver details","you have accepted",
-                        "ride accepted","accepted the ride","you're on your way","on the way"
-                    ],
-                    view_id_patterns: ["accept", "order"]
-                },
-                "Namma Yatri": {
-                    accept_keywords: ["Confirm", "Accept", "Accept Ride"],
-                    success_signals: [
-                        "start ride","go to pickup","going to pickup","picking up",
-                        "pick up location","navigate","pickup","confirm otp","enter otp",
-                        "verify otp","otp","arrived","reached","waiting","trip started",
-                        "start trip","rider details","customer details","driver details",
-                        "you have accepted","ride accepted","accepted the ride",
-                        "you're on your way","on the way"
-                    ],
-                    view_id_patterns: ["accept", "confirm"]
-                }
+                Uber: { accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride","go to pickup","going to pickup","picking up","pick up location","navigate","pickup","confirm otp","enter otp","verify otp","otp","arrived","reached","waiting","trip started","start trip","rider details","customer details","driver details","you have accepted","ride accepted","accepted the ride","you're on your way","on the way"], view_id_patterns: ["accept", "match", "confirm"] },
+                Ola: { accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride","go to pickup","going to pickup","picking up","pick up location","otp submit","navigate","pickup","confirm otp","enter otp","verify otp","otp","arrived","reached","waiting","trip started","start trip","rider details","customer details","driver details","you have accepted","ride accepted","accepted the ride","you're on your way","on the way"], view_id_patterns: ["accept", "confirm"] },
+                Rapido: { accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride","go to pickup","going to pickup","picking up","pick up location","client located","navigate","pickup","confirm otp","enter otp","verify otp","otp","arrived","reached","waiting","trip started","start trip","rider details","customer details","driver details","you have accepted","ride accepted","accepted the ride","you're on your way","on the way"], view_id_patterns: ["accept", "order"] },
+                "Namma Yatri": { accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride","go to pickup","going to pickup","picking up","pick up location","navigate","pickup","confirm otp","enter otp","verify otp","otp","arrived","reached","waiting","trip started","start trip","rider details","customer details","driver details","you have accepted","ride accepted","accepted the ride","you're on your way","on the way"], view_id_patterns: ["accept", "confirm"] }
             },
-            global: {
-                max_ride_cycle_duration_ms: 8000,
-                watchdog_interval_ms: 2000,
-                health_check_interval_ms: 300000
-            }
+            global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000 }
         });
-    } catch (error) {
-        console.error('RIDE BOT CONFIG ERROR:', error);
-        return res.status(500).json({
-            success: false,
-            message: 'Unable to load ride bot config.'
-        });
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to load ride bot config.' }); }
 });
 
-// ============================================================
-// ADMIN: RIDE BOT CONFIG VERSION CONTROL
-// ============================================================
-
 app.get('/api/admin/config/version', async (req, res) => {
-    if (!verifyAdminToken(req)) {
-        return res.status(401).json({ success: false, message: 'Unauthorized.' });
-    }
-    try {
-        const version = await getRideBotConfigVersion();
-        return res.json({ success: true, version: version, source: 'redis-or-env-fallback' });
-    } catch (error) {
-        console.error('ADMIN CONFIG VERSION ERROR:', error);
-        return res.status(500).json({ success: false, message: 'Unable to read config version.' });
-    }
+    if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    try { return res.json({ success: true, version: await getRideBotConfigVersion(), source: 'redis-or-env-fallback' }); } 
+    catch (error) { return res.status(500).json({ success: false, message: 'Unable to read config version.' }); }
 });
 
 app.post('/api/admin/config/bump', async (req, res) => {
-    if (!verifyAdminToken(req)) {
-        return res.status(401).json({ success: false, message: 'Unauthorized.' });
-    }
+    if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
     try {
-        const current = await getRideBotConfigVersion();
-        const next = current + 1;
+        const current = await getRideBotConfigVersion(); const next = current + 1;
         await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(next));
-        return res.json({
-            success: true,
-            previousVersion: current,
-            newVersion: next,
-            message: `Config version bumped to ${next}.`
-        });
-    } catch (error) {
-        console.error('ADMIN CONFIG BUMP ERROR:', error);
-        return res.status(500).json({ success: false, message: 'Unable to bump config version.' });
-    }
+        return res.json({ success: true, previousVersion: current, newVersion: next, message: `Config version bumped to ${next}.` });
+    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to bump config version.' }); }
 });
 
 app.post('/api/admin/config/set', async (req, res) => {
-    if (!verifyAdminToken(req)) {
-        return res.status(401).json({ success: false, message: 'Unauthorized.' });
-    }
+    if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
     try {
         const requested = Number(req.body.version);
-        if (!Number.isFinite(requested) || requested <= 0 || !Number.isInteger(requested)) {
-            return res.status(400).json({ success: false, message: 'version must be a positive integer.' });
-        }
+        if (!Number.isFinite(requested) || requested <= 0 || !Number.isInteger(requested)) return res.status(400).json({ success: false, message: 'version must be a positive integer.' });
         await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(requested));
         return res.json({ success: true, newVersion: requested });
-    } catch (error) {
-        console.error('ADMIN CONFIG SET ERROR:', error);
-        return res.status(500).json({ success: false, message: 'Unable to set config version.' });
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to set config version.' }); }
 });
-
-// ============================================================
-// HEALTH REPORT API
-// ============================================================
 
 app.post('/api/health/report', async (req, res) => {
     try {
         const { type, platform, appVersion, deviceModel, androidVersion, accessibilitySnapshot, timestamp, driverPhoneHash } = req.body;
         const reportId = `report:${Date.now()}:${Math.random().toString(36).slice(2)}`;
         const today = new Date().toISOString().slice(0, 10);
-
-        await redis.setex(reportId, 7 * 24 * 60 * 60, JSON.stringify({
-            type, platform, appVersion, deviceModel, androidVersion,
-            snapshot: accessibilitySnapshot?.substring(0, 5000),
-            timestamp, driverPhoneHash
-        }));
-
-        await redis.incr(`counter:${platform}:${type}:${today}`);
-        await redis.incr(`counter:total:${today}`);
-
+        await redis.setex(reportId, 7 * 24 * 60 * 60, JSON.stringify({ type, platform, appVersion, deviceModel, androidVersion, snapshot: accessibilitySnapshot?.substring(0, 5000), timestamp, driverPhoneHash }));
+        await redis.incr(`counter:${platform}:${type}:${today}`); await redis.incr(`counter:total:${today}`);
         return res.status(200).json({ success: true, reportId });
-    } catch (error) {
-        console.error('Health report error:', error);
-        return res.status(500).json({ success: false, error: 'Failed to save report' });
-    }
+    } catch (error) { return res.status(500).json({ success: false, error: 'Failed to save report' }); }
 });
 
-// ============================================================
-// ADMIN DASHBOARD API
-// ============================================================
-
 app.get('/api/admin/dashboard', async (req, res) => {
-    if (!verifyAdminToken(req)) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
+    if (!verifyAdminToken(req)) return res.status(401).json({ error: 'Unauthorized' });
     try {
-        const today = new Date().toISOString().slice(0, 10);
-        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-        const platforms = ['Ola', 'Rapido', 'Uber', 'Namma Yatri'];
-        const types = ['NO_RIDE_DETECTED_5MIN', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'CREDIT_FAILED'];
+        const today = new Date().toISOString().slice(0, 10); const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        const platforms = ['Ola', 'Rapido', 'Uber', 'Namma Yatri']; const types = ['NO_RIDE_DETECTED_5MIN', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'CREDIT_FAILED'];
         const stats = {};
-
         for (const platform of platforms) {
             stats[platform] = {};
             for (const type of types) {
@@ -926,54 +504,19 @@ app.get('/api/admin/dashboard', async (req, res) => {
                 stats[platform][type] = { today: todayCount, yesterday: yesterdayCount, change: todayCount - yesterdayCount };
             }
         }
-
-        const totalToday = parseInt(await redis.get(`counter:total:${today}`) || 0);
-        const totalYesterday = parseInt(await redis.get(`counter:total:${yesterday}`) || 0);
-
-        let totalErrors = 0;
-        for (const p of Object.keys(stats)) {
-            for (const t of Object.keys(stats[p])) totalErrors += stats[p][t].today;
-        }
+        const totalToday = parseInt(await redis.get(`counter:total:${today}`) || 0); const totalYesterday = parseInt(await redis.get(`counter:total:${yesterday}`) || 0);
+        let totalErrors = 0; for (const p of Object.keys(stats)) { for (const t of Object.keys(stats[p])) totalErrors += stats[p][t].today; }
         const healthScore = Math.max(0, 100 - Math.floor(totalErrors / 100));
-
-        return res.status(200).json({
-            date: today,
-            totalReports: totalToday,
-            yesterdayReports: totalYesterday,
-            healthScore,
-            platforms: stats,
-            alert: healthScore < 90 ? "Platform issue detected" : "All systems normal"
-        });
-    } catch (error) {
-        console.error('Dashboard error:', error);
-        return res.status(500).json({ error: 'Dashboard failed' });
-    }
+        return res.status(200).json({ date: today, totalReports: totalToday, yesterdayReports: totalYesterday, healthScore, platforms: stats, alert: healthScore < 90 ? "Platform issue detected" : "All systems normal" });
+    } catch (error) { return res.status(500).json({ error: 'Dashboard failed' }); }
 });
 
-// ============================================================
-// PRIVATE DRIVER TRACKER ADMIN ENDPOINT
-// ============================================================
-
-app.get('/api/admin/tracker', async (req, res) => {
-    return handleDriverTrackerAdmin(req, res);
-});
-
-// ============================================================
-// TEST API
-// ============================================================
-
-app.get('/api/test', (req, res) => {
-    res.json({
-        success: true,
-        message: 'Android app successfully connected to Firebase backend!',
-        timestamp: new Date().toISOString()
-    });
-});
+app.get('/api/admin/tracker', async (req, res) => { return handleDriverTrackerAdmin(req, res); });
+app.get('/api/test', (req, res) => { res.json({ success: true, message: 'Android app successfully connected to Firebase backend!', timestamp: new Date().toISOString() }); });
 
 // ============================================================
 // LOGIN / REGISTER ✅ APP CHECK VERIFIED
 // ============================================================
-
 app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
     try {
         const phone = normalizePhone(req.body.phone);
@@ -983,148 +526,82 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
         const deviceId = normalizeInstallId(req.body.deviceId);
         const trialDeviceId = deviceId || installId;
 
-        if (!phone) {
-            return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit Indian mobile number.' });
-        }
-
-        if (isFakePhone(phone)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Please enter a real mobile number.'
-            });
-        }
-
-        if (!isValidPin(pin)) {
-            return res.status(400).json({ success: false, message: 'PIN must be exactly 6 digits.' });
-        }
-        if (!installId) {
-            return res.status(400).json({ success: false, message: 'App installation identity required.' });
-        }
+        if (!phone) return res.status(400).json({ success: false, message: 'Please enter a valid 10-digit Indian mobile number.' });
+        if (isFakePhone(phone)) return res.status(400).json({ success: false, message: 'Please enter a real mobile number.' });
+        if (!isValidPin(pin)) return res.status(400).json({ success: false, message: 'PIN must be exactly 6 digits.' });
+        if (!installId) return res.status(400).json({ success: false, message: 'App installation identity required.' });
 
         const db = getDB();
         const lockState = await getPinLockState(db, phone);
 
         if (lockState.locked) {
             const remainingMinutes = Math.max(1, Math.ceil((lockState.lockedUntilMs - Date.now()) / (60 * 1000)));
-            return res.status(429).json({
-                success: false,
-                message: `Too many wrong PIN attempts. Try again in ${remainingMinutes} minute(s).`
-            });
+            return res.status(429).json({ success: false, message: `Too many wrong PIN attempts. Try again in ${remainingMinutes} minute(s).` });
         }
 
         const userRef = db.collection('users').doc(phone);
         const existingUserDoc = await userRef.get();
         const driverFirebaseUid = generateDriverFirebaseUid(phone);
 
-        let isNewUser = false;
-        let trialAdded = false;
-        let pinWasCreated = false;
-        let userData = null;
+        let isNewUser = false; let trialAdded = false; let pinWasCreated = false; let userData = null;
 
         if (existingUserDoc.exists) {
             userData = existingUserDoc.data() || {};
             const updates = {};
 
             if (userData.pinHash && userData.pinSalt) {
-                const validPin = verifyPinHash(pin, userData.pinSalt, userData.pinHash);
-                if (!validPin) {
+                if (!verifyPinHash(pin, userData.pinSalt, userData.pinHash)) {
                     const failure = await recordPinFailure(db, phone);
-                    if (failure.locked) {
-                        return res.status(429).json({
-                            success: false,
-                            message: `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.`
-                        });
-                    }
+                    if (failure.locked) return res.status(429).json({ success: false, message: `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.` });
                     return res.status(401).json({ success: false, message: 'Invalid mobile number or PIN.' });
                 }
             } else {
                 const pinData = createPinHash(pin);
-                updates.pinSalt = pinData.pinSalt;
-                updates.pinHash = pinData.pinHash;
-                updates.pinCreatedAt = admin.firestore.FieldValue.serverTimestamp();
-                pinWasCreated = true;
+                updates.pinSalt = pinData.pinSalt; updates.pinHash = pinData.pinHash; updates.pinCreatedAt = admin.firestore.FieldValue.serverTimestamp(); pinWasCreated = true;
             }
 
             if (!userData.migratedToTimeSystem) {
-                const now = Date.now();
-                const currentExpiry = Number(userData.planExpiry || 0);
+                const now = Date.now(); const currentExpiry = Number(userData.planExpiry || 0);
                 updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS;
-                updates.migratedToTimeSystem = true;
-                trialAdded = true;
+                updates.migratedToTimeSystem = true; trialAdded = true;
             }
 
-            if (typeof userData.activePlan !== 'string') {
-                updates.activePlan = PLAN_TYPE_NONE;
-            }
-            if (typeof userData.planExpiry !== 'number') {
-                updates.planExpiry = updates.planExpiry || 0;
-            }
-            if (typeof userData.totalRides !== 'number') {
-                updates.totalRides = Number(userData.totalRides || 0);
-            }
+            if (typeof userData.activePlan !== 'string') updates.activePlan = PLAN_TYPE_NONE;
+            if (typeof userData.planExpiry !== 'number') updates.planExpiry = updates.planExpiry || 0;
+            if (typeof userData.totalRides !== 'number') updates.totalRides = Number(userData.totalRides || 0);
 
-            updates.firebaseUid = driverFirebaseUid;
-            updates.authMethod = 'pin';
-
-            if (!userData.referralCode) {
-                updates.referralCode = await createUniqueReferralCode(db, userRef);
-            }
-
+            updates.firebaseUid = driverFirebaseUid; updates.authMethod = 'pin';
+            if (!userData.referralCode) updates.referralCode = await createUniqueReferralCode(db, userRef);
             updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
             await userRef.update(updates);
             userData = { ...userData, ...updates };
         } else {
-            // New user creation logic ...
             try {
-                const clientIp = String(
-                    req.headers['x-forwarded-for'] ||
-                    req.headers['x-real-ip'] ||
-                    req.socket?.remoteAddress ||
-                    'unknown'
-                ).split(',')[0].trim();
-
+                const clientIp = String(req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
                 if (clientIp && clientIp !== 'unknown' && clientIp !== '::1' && clientIp !== '127.0.0.1') {
-                    const ipKey = `trial:ip:${clientIp}`;
-                    const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
-
-                    if (currentCount >= TRIAL_IP_LIMIT) {
-                        return res.status(429).json({
-                            success: false,
-                            message: 'Too many new accounts from this network. Please try again tomorrow.'
-                        });
-                    }
-
+                    const ipKey = `trial:ip:${clientIp}`; const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
+                    if (currentCount >= TRIAL_IP_LIMIT) return res.status(429).json({ success: false, message: 'Too many new accounts from this network. Please try again tomorrow.' });
                     await redis.incr(ipKey);
-                    if (currentCount === 0) {
-                        await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
-                    }
+                    if (currentCount === 0) await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
                 }
-            } catch (ipError) {
-                console.error('IP RATE LIMIT ERROR (non-blocking):', ipError);
-            }
+            } catch (ipError) { console.error('IP RATE LIMIT ERROR:', ipError); }
 
             isNewUser = true;
             const newReferralCode = await createUniqueReferralCode(db, userRef);
-            let referralApplied = false;
-            let referrerPhone = '';
-            let referralLedgerRef = null;
+            let referralApplied = false; let referrerPhone = ''; let referralLedgerRef = null;
 
             if (referralCode) {
                 const referralRef = db.collection('referralCodes').doc(referralCode);
                 const referralDoc = await referralRef.get();
-
                 if (referralDoc.exists) {
                     const referralData = referralDoc.data() || {};
                     const possibleReferrerPhone = normalizePhone(referralData.userId || '');
-
                     if (possibleReferrerPhone && possibleReferrerPhone !== phone) {
                         const referrerUserRef = db.collection('users').doc(possibleReferrerPhone);
                         const referrerDoc = await referrerUserRef.get();
-
                         if (referrerDoc.exists) {
-                            referralApplied = true;
-                            referrerPhone = possibleReferrerPhone;
+                            referralApplied = true; referrerPhone = possibleReferrerPhone;
                             referralLedgerRef = db.collection('referralRewards').doc(`${referrerPhone}_${phone}`);
                         }
                     }
@@ -1137,98 +614,49 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
             const transactionResult = await db.runTransaction(async transaction => {
                 const freshUser = await transaction.get(userRef);
-                if (freshUser.exists) {
-                    return { created: false, trialGranted: false };
-                }
+                if (freshUser.exists) return { created: false, trialGranted: false };
 
                 const trialDoc = await transaction.get(trialClaimRef);
                 const deviceTrialDoc = await transaction.get(deviceTrialClaimRef);
                 let ledgerDoc = null;
-
-                if (referralLedgerRef) {
-                    ledgerDoc = await transaction.get(referralLedgerRef);
-                }
+                if (referralLedgerRef) ledgerDoc = await transaction.get(referralLedgerRef);
 
                 const trialGranted = !trialDoc.exists && !deviceTrialDoc.exists;
                 const startingExpiry = trialGranted ? (Date.now() + TRIAL_DURATION_MS) : 0;
 
                 transaction.set(userRef, {
-                    phone: phone,
-                    firebaseUid: driverFirebaseUid,
-                    activePlan: PLAN_TYPE_NONE,
-                    planExpiry: startingExpiry,
-                    totalRides: 0,
-                    referralCode: newReferralCode,
-                    referredBy: referralApplied ? referrerPhone : null,
-                    referralApplied: referralApplied,
-                    pinSalt: pinData.pinSalt,
-                    pinHash: pinData.pinHash,
-                    authMethod: 'pin',
-                    trialClaimed: trialGranted,
-                    trialInstallIdHash: hashInstallId(installId),
-                    deviceIdHash: hashInstallId(trialDeviceId),
-                    migratedToTimeSystem: true,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    pinCreatedAt: admin.firestore.FieldValue.serverTimestamp(),
-                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                    phone, firebaseUid: driverFirebaseUid, activePlan: PLAN_TYPE_NONE, planExpiry: startingExpiry,
+                    totalRides: 0, referralCode: newReferralCode, referredBy: referralApplied ? referrerPhone : null,
+                    referralApplied, pinSalt: pinData.pinSalt, pinHash: pinData.pinHash, authMethod: 'pin',
+                    trialClaimed: trialGranted, trialInstallIdHash: hashInstallId(installId), deviceIdHash: hashInstallId(trialDeviceId),
+                    migratedToTimeSystem: true, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    pinCreatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
 
                 if (trialGranted) {
-                    transaction.set(trialClaimRef, {
-                        installIdHash: hashInstallId(installId),
-                        firstPhone: phone,
-                        hoursGranted: 24,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
-
-                    transaction.set(deviceTrialClaimRef, {
-                        deviceIdHash: hashInstallId(trialDeviceId),
-                        firstPhone: phone,
-                        hoursGranted: 24,
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
+                    transaction.set(trialClaimRef, { installIdHash: hashInstallId(installId), firstPhone: phone, hoursGranted: 24, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+                    transaction.set(deviceTrialClaimRef, { deviceIdHash: hashInstallId(trialDeviceId), firstPhone: phone, hoursGranted: 24, createdAt: admin.firestore.FieldValue.serverTimestamp() });
                 }
 
                 if (referralApplied && referralLedgerRef && (!ledgerDoc || !ledgerDoc.exists)) {
-                    transaction.set(referralLedgerRef, {
-                        referrerPhone: referrerPhone,
-                        referredPhone: phone,
-                        bonusHours: 3,
-                        status: 'pending',
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
+                    transaction.set(referralLedgerRef, { referrerPhone, referredPhone: phone, bonusHours: 3, status: 'pending', createdAt: admin.firestore.FieldValue.serverTimestamp() });
                 }
 
-                return { created: true, trialGranted: trialGranted };
+                return { created: true, trialGranted };
             });
 
             if (!transactionResult.created) {
                 const racedUser = await userRef.get();
-                if (!racedUser.exists) {
-                    return res.status(409).json({
-                        success: false,
-                        message: 'Account creation conflict. Please try again.'
-                    });
-                }
-
+                if (!racedUser.exists) return res.status(409).json({ success: false, message: 'Account creation conflict. Please try again.' });
                 userData = racedUser.data() || {};
-
                 if (userData.pinHash && userData.pinSalt) {
-                    const validPin = verifyPinHash(pin, userData.pinSalt, userData.pinHash);
-                    if (!validPin) {
+                    if (!verifyPinHash(pin, userData.pinSalt, userData.pinHash)) {
                         const failure = await recordPinFailure(db, phone);
-                        if (failure.locked) {
-                            return res.status(429).json({
-                                success: false,
-                                message: `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.`
-                            });
-                        }
+                        if (failure.locked) return res.status(429).json({ success: false, message: `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.` });
                         return res.status(401).json({ success: false, message: 'Invalid mobile number or PIN.' });
                     }
                 }
-
-                trialAdded = false;
-                isNewUser = false;
+                trialAdded = false; isNewUser = false;
             } else {
                 trialAdded = transactionResult.trialGranted;
                 const createdUserDoc = await userRef.get();
@@ -1238,56 +666,33 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                     await db.runTransaction(async transaction => {
                         const freshLedger = await transaction.get(referralLedgerRef);
                         if (!freshLedger.exists) return;
-
                         const ledgerData = freshLedger.data() || {};
                         if (ledgerData.status !== 'pending') return;
-
                         const referrerRef = db.collection('users').doc(referrerPhone);
                         const referrerDoc = await transaction.get(referrerRef);
                         if (!referrerDoc.exists) return;
-
                         const referrerData = referrerDoc.data() || {};
                         let refExpiry = Number(referrerData.planExpiry || 0);
                         const now = Date.now();
-                        
-                        if (refExpiry < now) {
-                            refExpiry = now;
-                        }
+                        if (refExpiry < now) refExpiry = now;
                         const updatedExpiry = refExpiry + REFERRAL_BONUS_MS;
-
-                        transaction.update(referrerRef, {
-                            planExpiry: updatedExpiry,
-                            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-                        });
-
-                        transaction.update(referralLedgerRef, {
-                            status: 'rewarded',
-                            rewardedAt: admin.firestore.FieldValue.serverTimestamp()
-                        });
+                        transaction.update(referrerRef, { planExpiry: updatedExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+                        transaction.update(referralLedgerRef, { status: 'rewarded', rewardedAt: admin.firestore.FieldValue.serverTimestamp() });
                     });
                 }
-
                 const finalUserDoc = await userRef.get();
                 userData = finalUserDoc.data() || {};
             }
         }
 
         await clearPinFailures(db, phone);
-
         const firebaseCustomToken = await admin.auth().createCustomToken(driverFirebaseUid, { driver: true });
 
         let referralCount = 0;
         try {
-            const referralCountSnapshot = await db
-                .collection('referralRewards')
-                .where('referrerPhone', '==', phone)
-                .where('status', '==', 'rewarded')
-                .count()
-                .get();
+            const referralCountSnapshot = await db.collection('referralRewards').where('referrerPhone', '==', phone).where('status', '==', 'rewarded').count().get();
             referralCount = Number(referralCountSnapshot.data().count || 0);
-        } catch (_) {
-            referralCount = 0;
-        }
+        } catch (_) { referralCount = 0; }
 
         const planExpiry = Number(userData.planExpiry || 0);
         const activePlan = getActivePlanType(userData);
@@ -1295,32 +700,17 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
         let welcomeMessage;
         if (isNewUser) {
-            welcomeMessage = trialAdded
-                ? `Welcome! 24 Hours Free Trial activated.`
-                : 'Account created. This installation has already used the free trial.';
+            welcomeMessage = trialAdded ? `Welcome! 24 Hours Free Trial activated.` : 'Account created. This installation has already used the free trial.';
         } else {
-            welcomeMessage = pinWasCreated
-                ? 'PIN created successfully. Welcome back!'
-                : 'Welcome back!';
+            welcomeMessage = pinWasCreated ? 'PIN created successfully. Welcome back!' : 'Welcome back!';
         }
 
         return res.json({
-            success: true,
-            isNewUser: isNewUser,
-            trialPlanAdded: trialAdded,
-            pinWasCreated: pinWasCreated,
-            authMethod: 'pin',
-            firebaseCustomToken: firebaseCustomToken,
-            message: welcomeMessage,
+            success: true, isNewUser, trialPlanAdded: trialAdded, pinWasCreated, authMethod: 'pin',
+            firebaseCustomToken, message: welcomeMessage,
             user: {
-                phone: userData.phone || phone,
-                firebaseUid: driverFirebaseUid,
-                activePlan: activePlan,
-                planExpiry: planExpiry,
-                isUnlimited: isUnlimited,
-                totalRides: Number(userData.totalRides || 0),
-                referralCode: userData.referralCode || '',
-                referralCount: referralCount
+                phone: userData.phone || phone, firebaseUid: driverFirebaseUid, activePlan, planExpiry, isUnlimited,
+                totalRides: Number(userData.totalRides || 0), referralCode: userData.referralCode || '', referralCount
             }
         });
     } catch (error) {
@@ -1329,133 +719,65 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
     }
 });
 
-// ============================================================
-// AUTHENTICATED USER BALANCE ✅ NAYA: TIME BASED
-// ============================================================
-
 app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = normalizePhone(req.params.phone);
-
-        if (!phoneMatchesAuthenticatedUser(req, phone)) {
-            return res.status(403).json({ success: false, message: 'You can only access your own account.' });
-        }
-
+        if (!phoneMatchesAuthenticatedUser(req, phone)) return res.status(403).json({ success: false, message: 'You can only access your own account.' });
         const snapshot = await getDB().collection('users').doc(phone).get();
-
-        if (!snapshot.exists) {
-            return res.status(404).json({ success: false, message: 'Driver account not found.' });
-        }
-
+        if (!snapshot.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
         const data = snapshot.data() || {};
 
         let referralCount = 0;
         try {
-            const referralCountSnapshot = await getDB()
-                .collection('referralRewards')
-                .where('referrerPhone', '==', phone)
-                .where('status', '==', 'rewarded')
-                .count()
-                .get();
+            const referralCountSnapshot = await getDB().collection('referralRewards').where('referrerPhone', '==', phone).where('status', '==', 'rewarded').count().get();
             referralCount = Number(referralCountSnapshot.data().count || 0);
-        } catch (_) {
-            referralCount = Number(data.referralCount || 0);
-        }
+        } catch (_) { referralCount = Number(data.referralCount || 0); }
 
         const planExpiry = Number(data.planExpiry || 0);
         const activePlan = getActivePlanType(data);
         const isUnlimited = planExpiry > Date.now();
 
         return res.json({
-            success: true,
-            activePlan: activePlan,
-            planExpiry: planExpiry,
+            success: true, activePlan, planExpiry,
             planExpiryIso: planExpiry > 0 ? new Date(planExpiry).toISOString() : null,
-            isUnlimited: isUnlimited,
-            totalRides: Number(data.totalRides || 0),
-            referralCode: data.referralCode || '',
-            referralCount: referralCount
+            isUnlimited, totalRides: Number(data.totalRides || 0), referralCode: data.referralCode || '', referralCount
         });
     } catch (error) {
-        console.error('BALANCE ERROR:', error);
         return res.status(500).json({ success: false, message: 'Unable to load balance.' });
     }
 });
 
-// ============================================================
-// REFERRAL DETAILS ✅ NAYA: TIME BASED
-// ============================================================
-
 app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = getAuthenticatedPhone(req);
-
-        if (!phone) {
-            return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
-        }
-
+        if (!phone) return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
         const db = getDB();
         const userSnapshot = await db.collection('users').doc(phone).get();
-
-        if (!userSnapshot.exists) {
-            return res.status(404).json({ success: false, message: 'Driver account not found.' });
-        }
-
+        if (!userSnapshot.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
         const userData = userSnapshot.data() || {};
         const referralCode = String(userData.referralCode || '').trim();
 
-        let successfulReferrals = 0;
-        let hoursEarned = 0;
-
+        let successfulReferrals = 0; let hoursEarned = 0;
         try {
-            const rewardedSnapshot = await db
-                .collection('referralRewards')
-                .where('referrerPhone', '==', phone)
-                .where('status', '==', 'rewarded')
-                .get();
-
-            successfulReferrals = rewardedSnapshot.size;
-            hoursEarned = successfulReferrals * 3; 
+            const rewardedSnapshot = await db.collection('referralRewards').where('referrerPhone', '==', phone).where('status', '==', 'rewarded').get();
+            successfulReferrals = rewardedSnapshot.size; hoursEarned = successfulReferrals * 3;
         } catch (referralError) {
-            console.error('REFERRAL COUNT ERROR:', referralError);
-            successfulReferrals = Number(userData.referralCount || 0);
-            hoursEarned = successfulReferrals * 3;
+            successfulReferrals = Number(userData.referralCount || 0); hoursEarned = successfulReferrals * 3;
         }
-
-        return res.json({
-            success: true,
-            referralCode: referralCode,
-            successfulReferrals: successfulReferrals,
-            hoursEarned: hoursEarned,
-            bonusHoursPerReferral: 3,
-            message: 'Referral details loaded.'
-        });
+        return res.json({ success: true, referralCode, successfulReferrals, hoursEarned, bonusHoursPerReferral: 3, message: 'Referral details loaded.' });
     } catch (error) {
-        console.error('REFERRAL DETAILS ERROR:', error);
         return res.status(500).json({ success: false, message: 'Unable to load referral details.' });
     }
 });
 
-// ============================================================
-// DEDUCT RIDE & REFUND (SAME AS BEFORE)
-// ============================================================
-
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = normalizePhone(req.body.phone);
-
-        if (!phoneMatchesAuthenticatedUser(req, phone)) {
-            return res.status(403).json({ success: false, message: 'You can only use your own account.' });
-        }
-
+        if (!phoneMatchesAuthenticatedUser(req, phone)) return res.status(403).json({ success: false, message: 'You can only use your own account.' });
         const db = getDB();
         const userRef = db.collection('users').doc(phone);
         const userSnapshot = await userRef.get();
-
-        if (!userSnapshot.exists) {
-            return res.status(404).json({ success: false, message: 'Driver account not found.' });
-        }
-
+        if (!userSnapshot.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
         const userData = userSnapshot.data() || {};
         const planExpiry = Number(userData.planExpiry || 0);
         const isUnlimited = planExpiry > Date.now();
@@ -1463,134 +785,82 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
 
         if (isUnlimited) {
             const totalRides = Number(userData.totalRides || 0) + 1;
-            await userRef.update({
-                totalRides: totalRides,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-
-            return res.json({
-                success: true,
-                alreadyProcessed: false,
-                ridesDeducted: 0,
-                unlimited: true,
-                planType: activePlanType,
-                message: `Unlimited ${activePlanType} plan active. No deduction.`
-            });
+            await userRef.update({ totalRides, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+            return res.json({ success: true, alreadyProcessed: false, ridesDeducted: 0, unlimited: true, planType: activePlanType, message: `Unlimited ${activePlanType} plan active. No deduction.` });
         } else {
-            return res.status(402).json({
-                success: false,
-                message: 'Plan expired. Please recharge to continue.'
-            });
+            return res.status(402).json({ success: false, message: 'Plan expired. Please recharge to continue.' });
         }
-    } catch (error) {
-        return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to process ride.' });
-    }
+    } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to process ride.' }); }
 });
 
 app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
     return res.json({ success: true, refunded: false, alreadyRefunded: false, message: 'Refund not applicable in time-based system.' });
 });
 
-// ============================================================
-// PAYMENTS (SAME AS BEFORE)
-// ============================================================
-
 app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = getAuthenticatedPhone(req);
         const amountRupees = Number(req.body.amountRupees);
-
         if (!phone) return res.status(401).json({ success: false, message: 'Authenticated driver required.' });
-
         const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
         if (!planConfig) return res.status(400).json({ success: false, message: 'Invalid plan amount.' });
 
-        const planType = planConfig.type;
-        const planDurationMs = planConfig.durationMs;
-        const receipt = generateReceipt();
-        const razorpay = getRazorpay();
+        const planType = planConfig.type; const planDurationMs = planConfig.durationMs;
+        const receipt = generateReceipt(); const razorpay = getRazorpay();
 
         const order = await razorpay.orders.create({
-            amount: amountRupees * 100,
-            currency: 'INR',
-            receipt: receipt,
-            partial_payment: false,
-            notes: { app: 'Driver Ride Picker', phone: phone, planType: planType, planDurationMs: String(planDurationMs) }
+            amount: amountRupees * 100, currency: 'INR', receipt,
+            partial_payment: false, notes: { app: 'Driver Ride Picker', phone, planType, planDurationMs: String(planDurationMs) }
         });
 
         await getDB().collection('paymentOrders').doc(order.id).set({
-            orderId: order.id, phone: phone, amountRupees: amountRupees, amountPaise: amountRupees * 100,
-            planType: planType, planDurationMs: planDurationMs, currency: 'INR', status: 'created',
-            receipt: receipt, createdAt: admin.firestore.FieldValue.serverTimestamp()
+            orderId: order.id, phone, amountRupees, amountPaise: amountRupees * 100,
+            planType, planDurationMs, currency: 'INR', status: 'created',
+            receipt, createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        return res.json({
-            success: true, keyId: process.env.RAZORPAY_KEY_ID, orderId: order.id,
-            amount: order.amount, currency: order.currency, planType: planType, planDurationMs: planDurationMs
-        });
-    } catch (error) {
-        return res.status(500).json({ success: false, message: error.message || 'Unable to create Razorpay order.' });
-    }
+        return res.json({ success: true, keyId: process.env.RAZORPAY_KEY_ID, orderId: order.id, amount: order.amount, currency: order.currency, planType, planDurationMs });
+    } catch (error) { return res.status(500).json({ success: false, message: error.message || 'Unable to create Razorpay order.' }); }
 });
 
 app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = getAuthenticatedPhone(req);
-        const orderId = String(req.body.orderId || '').trim();
-        const paymentId = String(req.body.paymentId || '').trim();
-        const signature = String(req.body.signature || '').trim();
-
+        const orderId = String(req.body.orderId || '').trim(); const paymentId = String(req.body.paymentId || '').trim(); const signature = String(req.body.signature || '').trim();
         if (!phone || !orderId || !paymentId || !signature) return res.status(400).json({ success: false, message: 'Payment data incomplete.' });
 
-        const db = getDB();
-        const orderRef = db.collection('paymentOrders').doc(orderId);
-        const orderSnapshot = await orderRef.get();
-
+        const db = getDB(); const orderRef = db.collection('paymentOrders').doc(orderId); const orderSnapshot = await orderRef.get();
         if (!orderSnapshot.exists) return res.status(404).json({ success: false, message: 'Payment order not found.' });
         const orderData = orderSnapshot.data() || {};
         if (normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
         if (!verifyRazorpaySignature(orderId, paymentId, signature)) return res.status(400).json({ success: false, message: 'Invalid signature.' });
         if (orderData.status === 'paid') return res.json({ success: true, alreadyProcessed: true, planType: orderData.planType || PLAN_TYPE_NONE, message: 'Payment already processed.' });
 
-        const razorpay = getRazorpay();
-        const payment = await razorpay.payments.fetch(paymentId);
+        const razorpay = getRazorpay(); const payment = await razorpay.payments.fetch(paymentId);
         if (String(payment.order_id || '') !== orderId || String(payment.status || '').toLowerCase() !== 'captured') {
             return res.status(400).json({ success: false, message: `Payment not captured. Status: ${payment.status}` });
         }
         if (Number(payment.amount || 0) !== Number(orderData.amountPaise || 0)) return res.status(400).json({ success: false, message: 'Payment amount mismatch.' });
 
-        const planType = String(orderData.planType || '').toUpperCase();
-        const planDurationMs = Number(orderData.planDurationMs || 0);
+        const planType = String(orderData.planType || '').toUpperCase(); const planDurationMs = Number(orderData.planDurationMs || 0);
         if (!VALID_PLAN_TYPES.includes(planType) || planDurationMs <= 0) return res.status(400).json({ success: false, message: 'Invalid plan data.' });
 
-        const userRef = db.collection('users').doc(phone);
-        let newPlanExpiry = 0;
+        const userRef = db.collection('users').doc(phone); let newPlanExpiry = 0;
 
         await db.runTransaction(async transaction => {
-            const freshOrder = await transaction.get(orderRef);
-            const freshUser = await transaction.get(userRef);
+            const freshOrder = await transaction.get(orderRef); const freshUser = await transaction.get(userRef);
             if (!freshUser.exists) throw new Error('Driver account not found.');
+            if (freshOrder.data()?.status === 'paid') { newPlanExpiry = Number(freshUser.data()?.planExpiry || 0); return; }
 
-            if (freshOrder.data()?.status === 'paid') {
-                newPlanExpiry = Number(freshUser.data()?.planExpiry || 0);
-                return;
-            }
-
-            const now = Date.now();
-            const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
+            const now = Date.now(); const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
             newPlanExpiry = (currentExpiry > now ? currentExpiry : now) + planDurationMs;
 
             transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-            transaction.update(orderRef, { status: 'paid', paymentId: paymentId, signature: signature, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
+            transaction.update(orderRef, { status: 'paid', paymentId, signature, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
         });
 
-        return res.json({
-            success: true, alreadyProcessed: false, planType: planType, planExpiry: newPlanExpiry,
-            planExpiryIso: new Date(newPlanExpiry).toISOString(), message: `${planType} plan activated successfully.`
-        });
-    } catch (error) {
-        return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' });
-    }
+        return res.json({ success: true, alreadyProcessed: false, planType, planExpiry: newPlanExpiry, planExpiryIso: new Date(newPlanExpiry).toISOString(), message: `${planType} plan activated successfully.` });
+    } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' }); }
 });
 
 module.exports = app;
