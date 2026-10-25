@@ -167,9 +167,10 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-const APP_LATEST_VERSION = '1.15.0';
-const APP_MINIMUM_VERSION = '1.15.0';
-const APP_APK_URL = 'https://driver-ride-picker-website.vercel.app/'; 
+// ✅ YAHAN UPDATE KIYA HAI (1.17.0 aur Naya GitHub APK Link)
+const APP_LATEST_VERSION = '1.17.0';
+const APP_MINIMUM_VERSION = '1.17.0';
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.17.0/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version install karein.';
 const APP_RELEASE_NOTES = '24 Hours Free Trial, +3 Hours Referral Bonus, Smart Ola/Uber Auto-Accept Fix, Time-based plans';
@@ -178,8 +179,7 @@ const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-// ✅ CHANGE 1: IP LIMIT KO 3 KAR DIYA HAI (Pehle 999999 tha)
-// Iska matlab ek IP (WiFi/Network) se din mein sirf 3 naye trial accounts ban sakte hain.
+// ✅ IP LIMIT KO 3 KAR DIYA HAI
 const TRIAL_IP_LIMIT = 3;
 const TRIAL_IP_WINDOW_SECONDS = 86400; // 24 hours
 
@@ -327,7 +327,7 @@ async function decodeFirebaseToken(req) {
     return admin.auth().verifyIdToken(idToken);
 }
 
-// ✅ CHANGE 2: APP CHECK SOFT MODE
+// ✅ APP CHECK SOFT MODE
 async function verifyAppCheck(req, res, next) {
     const enforce = process.env.APP_CHECK_ENFORCE === 'true';
     const appCheckToken = req.headers['x-firebase-appcheck'];
@@ -358,7 +358,6 @@ async function verifyAppCheck(req, res, next) {
     }
 }
 
-// ✅ CHANGE 3: MISSING FUNCTION ADD KIYA (Iske bina app crash ho rahi thi)
 async function verifyFirebaseToken(req, res, next) {
     try {
         const decoded = await decodeFirebaseToken(req);
