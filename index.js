@@ -132,8 +132,7 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 // CONFIG ✅ TIME BASED SYSTEM
 // ============================================================
-// ✅ YAHAN 24 SE 48 HOURS KAR DIYA HAI
-const TRIAL_DURATION_MS = 48 * 60 * 60 * 1000;
+const TRIAL_DURATION_MS = 48 * 60 * 60 * 1000; // 48 Hours
 const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000;
 
 const DAILY_PLAN_AMOUNT = 15;
@@ -168,19 +167,18 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ YAHAN UPDATE KIYA HAI (1.17.0 aur Naya GitHub APK Link)
-const APP_LATEST_VERSION = '1.17.0';
-const APP_MINIMUM_VERSION = '1.17.0';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.17.0/app-release.apk'; 
+// ✅ UPDATE VERSION HERE
+const APP_LATEST_VERSION = '1.18.0';
+const APP_MINIMUM_VERSION = '1.18.0';
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version install karein.';
-const APP_RELEASE_NOTES = '48 Hours Free Trial, +3 Hours Referral Bonus, Smart Ola/Uber Auto-Accept Fix, Time-based plans'; // ✅ Yahan 48 kar diya
+const APP_RELEASE_NOTES = '48 Hours Free Trial Promo, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-// ✅ IP LIMIT KO 3 KAR DIYA HAI
 const TRIAL_IP_LIMIT = 3;
 const TRIAL_IP_WINDOW_SECONDS = 86400; // 24 hours
 
@@ -582,6 +580,35 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 updates.migratedToTimeSystem = true; trialAdded = true;
             }
 
+            // ✅ NAYA V18 PROMO LOGIC (PURANE USERS KE LIYE)
+            if (!userData.v18PromoClaimed) {
+                const deviceTrialClaimRef = db.collection('deviceTrialClaims').doc(hashInstallId(trialDeviceId));
+                const deviceTrialDoc = await deviceTrialClaimRef.get();
+
+                if (!deviceTrialDoc.exists) {
+                    // Agar is phone par pehle koi promo nahi liya, toh 48 ghante do
+                    const now = Date.now();
+                    const currentExpiry = Number(userData.planExpiry || 0);
+                    updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS; // 48 hours
+                    updates.v18PromoClaimed = true; // User ko mark kar do
+                    trialAdded = true;
+
+                    // Device ko lock kar do taaki same phone par dusra number ye promo na le sake
+                    await deviceTrialClaimRef.set({
+                        deviceIdHash: hashInstallId(trialDeviceId),
+                        firstPhone: phone,
+                        hoursGranted: 48,
+                        promo: 'V18',
+                        createdAt: admin.firestore.FieldValue.serverTimestamp()
+                    });
+                    console.log(`V18 Promo 48H granted to existing user: ${phone} on new device`);
+                } else {
+                    // Agar device pehle se lock hai, toh time mat do, par user ko mark kar do
+                    updates.v18PromoClaimed = true;
+                    console.log(`V18 Promo BLOCKED for user: ${phone} (Device already claimed)`);
+                }
+            }
+
             if (typeof userData.activePlan !== 'string') updates.activePlan = PLAN_TYPE_NONE;
             if (typeof userData.planExpiry !== 'number') updates.planExpiry = updates.planExpiry || 0;
             if (typeof userData.totalRides !== 'number') updates.totalRides = Number(userData.totalRides || 0);
@@ -645,12 +672,13 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                     totalRides: 0, referralCode: newReferralCode, referredBy: referralApplied ? referrerPhone : null,
                     referralApplied, pinSalt: pinData.pinSalt, pinHash: pinData.pinHash, authMethod: 'pin',
                     trialClaimed: trialGranted, trialInstallIdHash: hashInstallId(installId), deviceIdHash: hashInstallId(trialDeviceId),
-                    migratedToTimeSystem: true, createdAt: admin.firestore.FieldValue.serverTimestamp(),
+                    migratedToTimeSystem: true, 
+                    v18PromoClaimed: true, // ✅ NAYE USER NE PEHLE HI TRIAL LE LIYA HAI
+                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     pinCreatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
 
                 if (trialGranted) {
-                    // ✅ YAHAN 48 HOURS KAR DIYA HAI
                     transaction.set(trialClaimRef, { installIdHash: hashInstallId(installId), firstPhone: phone, hoursGranted: 48, createdAt: admin.firestore.FieldValue.serverTimestamp() });
                     transaction.set(deviceTrialClaimRef, { deviceIdHash: hashInstallId(trialDeviceId), firstPhone: phone, hoursGranted: 48, createdAt: admin.firestore.FieldValue.serverTimestamp() });
                 }
@@ -717,7 +745,6 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
         let welcomeMessage;
         if (isNewUser) {
-            // ✅ YAHAN WELCOME MESSAGE UPDATE KIYA HAI
             welcomeMessage = trialAdded ? `Welcome! 48 Hours Free Trial activated.` : 'Account created. This installation has already used the free trial.';
         } else {
             welcomeMessage = pinWasCreated ? 'PIN created successfully. Welcome back!' : 'Welcome back!';
