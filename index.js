@@ -167,13 +167,13 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ UPDATE VERSION HERE (Wapas 1.17.0 kar diya gaya hai)
-const APP_LATEST_VERSION = '1.17.0';
-const APP_MINIMUM_VERSION = '1.17.0';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.17.0/app-release.apk'; 
+// ✅ UPDATE VERSION HERE - v1.18.0
+const APP_LATEST_VERSION = '1.18.0';
+const APP_MINIMUM_VERSION = '1.18.0';
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version install karein.';
-const APP_RELEASE_NOTES = '48 Hours Free Trial Promo, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.18.0) install karein.';
+const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 48 Hours Free Trial Promo, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -586,14 +586,12 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 const deviceTrialDoc = await deviceTrialClaimRef.get();
 
                 if (!deviceTrialDoc.exists) {
-                    // Agar is phone par pehle koi promo nahi liya, toh 48 ghante do
                     const now = Date.now();
                     const currentExpiry = Number(userData.planExpiry || 0);
-                    updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS; // 48 hours
-                    updates.v18PromoClaimed = true; // User ko mark kar do
+                    updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS;
+                    updates.v18PromoClaimed = true;
                     trialAdded = true;
 
-                    // Device ko lock kar do taaki same phone par dusra number ye promo na le sake
                     await deviceTrialClaimRef.set({
                         deviceIdHash: hashInstallId(trialDeviceId),
                         firstPhone: phone,
@@ -603,7 +601,6 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                     });
                     console.log(`V18 Promo 48H granted to existing user: ${phone} on new device`);
                 } else {
-                    // Agar device pehle se lock hai, toh time mat do, par user ko mark kar do
                     updates.v18PromoClaimed = true;
                     console.log(`V18 Promo BLOCKED for user: ${phone} (Device already claimed)`);
                 }
@@ -673,7 +670,7 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                     referralApplied, pinSalt: pinData.pinSalt, pinHash: pinData.pinHash, authMethod: 'pin',
                     trialClaimed: trialGranted, trialInstallIdHash: hashInstallId(installId), deviceIdHash: hashInstallId(trialDeviceId),
                     migratedToTimeSystem: true, 
-                    v18PromoClaimed: true, // ✅ NAYE USER NE PEHLE HI TRIAL LE LIYA HAI
+                    v18PromoClaimed: true,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     pinCreatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
