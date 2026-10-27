@@ -132,7 +132,8 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 // CONFIG ✅ TIME BASED SYSTEM
 // ============================================================
-const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000;
+// ✅ YAHAN 24 SE 48 HOURS KAR DIYA HAI
+const TRIAL_DURATION_MS = 48 * 60 * 60 * 1000;
 const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000;
 
 const DAILY_PLAN_AMOUNT = 15;
@@ -173,7 +174,7 @@ const APP_MINIMUM_VERSION = '1.17.0';
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.17.0/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version install karein.';
-const APP_RELEASE_NOTES = '24 Hours Free Trial, +3 Hours Referral Bonus, Smart Ola/Uber Auto-Accept Fix, Time-based plans';
+const APP_RELEASE_NOTES = '48 Hours Free Trial, +3 Hours Referral Bonus, Smart Ola/Uber Auto-Accept Fix, Time-based plans'; // ✅ Yahan 48 kar diya
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -649,8 +650,9 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 });
 
                 if (trialGranted) {
-                    transaction.set(trialClaimRef, { installIdHash: hashInstallId(installId), firstPhone: phone, hoursGranted: 24, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-                    transaction.set(deviceTrialClaimRef, { deviceIdHash: hashInstallId(trialDeviceId), firstPhone: phone, hoursGranted: 24, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+                    // ✅ YAHAN 48 HOURS KAR DIYA HAI
+                    transaction.set(trialClaimRef, { installIdHash: hashInstallId(installId), firstPhone: phone, hoursGranted: 48, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+                    transaction.set(deviceTrialClaimRef, { deviceIdHash: hashInstallId(trialDeviceId), firstPhone: phone, hoursGranted: 48, createdAt: admin.firestore.FieldValue.serverTimestamp() });
                 }
 
                 if (referralApplied && referralLedgerRef && (!ledgerDoc || !ledgerDoc.exists)) {
@@ -715,7 +717,8 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
         let welcomeMessage;
         if (isNewUser) {
-            welcomeMessage = trialAdded ? `Welcome! 24 Hours Free Trial activated.` : 'Account created. This installation has already used the free trial.';
+            // ✅ YAHAN WELCOME MESSAGE UPDATE KIYA HAI
+            welcomeMessage = trialAdded ? `Welcome! 48 Hours Free Trial activated.` : 'Account created. This installation has already used the free trial.';
         } else {
             welcomeMessage = pinWasCreated ? 'PIN created successfully. Welcome back!' : 'Welcome back!';
         }
