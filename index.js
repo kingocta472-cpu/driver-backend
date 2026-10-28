@@ -167,13 +167,13 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ UPDATE VERSION HERE - v1.18.0
-const APP_LATEST_VERSION = '1.18.0';
-const APP_MINIMUM_VERSION = '1.18.0';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk'; 
+// ✅ UPDATE VERSION HERE - v1.19.0
+const APP_LATEST_VERSION = '1.19.0';
+const APP_MINIMUM_VERSION = '1.19.0';
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.19.0/app-release.apk';
 const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.18.0) install karein.';
-const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 48 Hours Free Trial Promo, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.0) install karein.';
+const APP_RELEASE_NOTES = 'v1.19.0: Bug fixes, performance improvements, better stability, telemetry summary support, smart auto-accept improvements, 48 Hours Free Trial, +3 Hours Referral Bonus, Time-based plans';
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -527,6 +527,66 @@ app.get('/api/admin/dashboard', async (req, res) => {
 
 app.get('/api/admin/tracker', async (req, res) => { return handleDriverTrackerAdmin(req, res); });
 app.get('/api/test', (req, res) => { res.json({ success: true, message: 'Android app successfully connected to Firebase backend!', timestamp: new Date().toISOString() }); });
+
+// ============================================================
+// TELEMETRY SUMMARY ✅ NEW - Android Bot se hourly summary
+// ============================================================
+app.post('/api/telemetry/summary', async (req, res) => {
+    try {
+        const phone = normalizePhone(req.body.phone);
+        if (!phone) {
+            return res.status(400).json({ success: false, message: 'Valid phone number required.' });
+        }
+
+        const deviceInfo = String(req.body.deviceInfo || '').slice(0, 500);
+        const successCount = Math.max(0, Number(req.body.successCount || 0));
+        const failCount = Math.max(0, Number(req.body.failCount || 0));
+        const failReasons = String(req.body.failReasons || '').slice(0, 2000);
+        const totalRides = successCount + failCount;
+
+        const summaryId = `summary:${Date.now()}:${crypto.randomBytes(4).toString('hex')}`;
+        const today = new Date().toISOString().slice(0, 10);
+
+        const payload = {
+            phone,
+            deviceInfo,
+            successCount,
+            failCount,
+            totalRides,
+            failReasons,
+            date: today,
+            createdAt: new Date().toISOString()
+        };
+
+        // Redis: raw log (30 days) + daily counters
+        try {
+            await redis.setex(summaryId, 30 * 24 * 60 * 60, JSON.stringify(payload));
+            await redis.incr(`telemetry:total:${today}`);
+            await redis.incrby(`telemetry:success:${today}`, successCount);
+            await redis.incrby(`telemetry:fail:${today}`, failCount);
+            await redis.incr(`telemetry:drivers:${today}`);
+        } catch (redisError) {
+            console.error('TELEMETRY REDIS ERROR:', redisError);
+        }
+
+        // Firestore: long-term record
+        try {
+            const db = getDB();
+            await db.collection('telemetrySummaries').doc(summaryId.replace(/:/g, '_')).set({
+                ...payload,
+                serverCreatedAt: admin.firestore.FieldValue.serverTimestamp()
+            });
+        } catch (fbError) {
+            console.error('TELEMETRY FIRESTORE ERROR:', fbError);
+        }
+
+        console.log(`TELEMETRY: phone=***${phone.slice(-4)}, success=${successCount}, fail=${failCount}, total=${totalRides}`);
+        return res.json({ success: true, summaryId, message: 'Telemetry summary recorded.' });
+    } catch (error) {
+        console.error('TELEMETRY ERROR:', error);
+        return res.status(500).json({ success: false, message: 'Unable to save telemetry.' });
+    }
+});
 
 // ============================================================
 // LOGIN / REGISTER ✅ APP CHECK VERIFIED
