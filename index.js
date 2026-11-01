@@ -531,6 +531,11 @@ function validateRemoteRideConfig(input) {
                 output.filters[field] = value;
             }
         }
+        if (input.filters.keyword_mode !== undefined) {
+            const mode = String(input.filters.keyword_mode).trim().toUpperCase();
+            if (!['ANY', 'ALL'].includes(mode)) throw new Error('filters.keyword_mode must be ANY or ALL.');
+            output.filters.keyword_mode = mode;
+        }
         const listFields = ['allowed_vehicles', 'target_areas', 'blocked_areas', 'required_keywords', 'blocked_keywords'];
         for (const field of listFields) {
             if (input.filters[field] !== undefined) {
@@ -559,7 +564,8 @@ function validateRemoteRideConfig(input) {
             debounce_normal_ms: [1, 500],
             debounce_slow_ms: [1, 500],
             location_min_time_ms: [1000, 60000],
-            location_min_distance_m: [1, 1000]
+            location_min_distance_m: [1, 1000],
+            plan_offline_grace_ms: [0, 1800000]
         };
         for (const [field, [min, max]] of Object.entries(limits)) {
             if (input.global[field] !== undefined) {
@@ -575,7 +581,8 @@ function validateRemoteRideConfig(input) {
                     debounce_normal_ms: 'debounceNormalMs',
                     debounce_slow_ms: 'debounceSlowMs',
                     location_min_time_ms: 'locationMinTimeMs',
-                    location_min_distance_m: 'locationMinDistanceM'
+                    location_min_distance_m: 'locationMinDistanceM',
+                    plan_offline_grace_ms: 'planOfflineGraceMs'
                 };
                 output.global[aliases[field]] = value;
             }
@@ -592,10 +599,14 @@ function validateRemoteRideConfig(input) {
             const item = input.strategies[name];
             if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(`Invalid strategy: ${name}`);
             const clean = {};
-            for (const field of ['attempts', 'tapIntervalMs', 'verifyDelayMs']) {
+            const numericFields = ['attempts', 'tapIntervalMs', 'verifyDelayMs'];
+            // The installed service has a separate slow-device fallback for Strategy 3.
+            // These values are accepted only for high_speed; Strategy 1 stays locked above.
+            if (name === 'high_speed') numericFields.push('attemptsSlow', 'verifyDelaySlowMs');
+            for (const field of numericFields) {
                 if (item[field] !== undefined) {
                     const n = Number(item[field]);
-                    const [min, max] = field === 'attempts' ? [1, 20] : [5, 1000];
+                    const [min, max] = field === 'attempts' || field === 'attemptsSlow' ? [1, 20] : [5, 1000];
                     if (!Number.isInteger(n) || n < min || n > max) throw new Error(`Invalid strategies.${name}.${field}`);
                     clean[field] = n;
                 }
