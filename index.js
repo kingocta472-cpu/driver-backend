@@ -778,6 +778,41 @@ app.post('/api/admin/config/ride-bot', async (req, res) => {
     } catch (error) { return res.status(400).json({ success: false, message: error.message || 'Unable to save remote config.' }); }
 });
 
+// Add a verified official platform package to remote config without an APK release.
+// This endpoint is intentionally admin-only: Telegram alerts are candidates, not proof.
+app.post('/api/admin/platform/package/add', async (req, res) => {
+    if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    try {
+        const platformName = String(req.body?.platform || '').trim();
+        const packageName = String(req.body?.packageName || '').trim();
+        const allowedPlatforms = ['Uber', 'Ola', 'Rapido', 'Namma Yatri'];
+        const packagePattern = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
+        if (!allowedPlatforms.includes(platformName)) return res.status(400).json({ success: false, message: 'Invalid platform. Use Uber, Ola, Rapido, or Namma Yatri.' });
+        if (!packagePattern.test(packageName) || packageName.length > 180) return res.status(400).json({ success: false, message: 'Invalid Android package name.' });
+
+        const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
+        const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
+        const merged = mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous);
+        const platformConfig = { ...(merged.platforms?.[platformName] || {}) };
+        const current = Array.isArray(platformConfig.package_names) ? platformConfig.package_names : [];
+        const alreadyPresent = current.includes(packageName);
+        platformConfig.package_names = [...new Set([...current, packageName])];
+        merged.platforms = { ...merged.platforms, [platformName]: platformConfig };
+
+        if (!alreadyPresent) {
+            await redis.set(RIDE_BOT_CONFIG_DATA_KEY, JSON.stringify(merged));
+            const previousVersion = await getRideBotConfigVersion();
+            const newVersion = previousVersion + 1;
+            await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(newVersion));
+            return res.json({ success: true, added: true, platform: platformName, packageName, previousVersion, newVersion, message: 'Package added. Compatible installed APKs will receive it on their next remote-config refresh.' });
+        }
+        return res.json({ success: true, added: false, platform: platformName, packageName, version: await getRideBotConfigVersion(), message: 'Package already exists in remote config.' });
+    } catch (error) {
+        console.error('PLATFORM PACKAGE ADD ERROR:', error.message || error);
+        return res.status(500).json({ success: false, message: 'Unable to add platform package.' });
+    }
+});
+
 app.get('/api/admin/config/version', async (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
     try { return res.json({ success: true, version: await getRideBotConfigVersion(), source: 'redis-or-env-fallback' }); } 
@@ -1423,6 +1458,15 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         const suppliedErrorId = String(req.body.errorId || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
         const errorId = suppliedErrorId || `DRP-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
 
+        let unknownPackageAutoApproval = null;
+        if (issueType === 'UNKNOWN_PACKAGE' && platform === 'UNKNOWN' && packageName !== 'unknown') {
+            try { unknownPackageAutoApproval = await tryAutoApproveReportedUnknownPackage(packageName); }
+            catch (verificationError) {
+                unknownPackageAutoApproval = { status: 'verification_failed', reason: String(verificationError.message || verificationError).slice(0, 160) };
+                console.error('UNKNOWN PACKAGE AUTO-VERIFICATION ERROR:', verificationError.message || verificationError);
+            }
+        }
+
         const now = Date.now();
         const windowBucket = Math.floor(now / (30 * 60 * 1000));
         const deviceKey = crypto.createHash('sha256').update(`${deviceModel}|${appVersion}`).digest('hex').slice(0, 20);
@@ -1483,6 +1527,17 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
                 `Remote config version: ${Number.isFinite(configVersion) ? configVersion : 0}`,
                 `Exact reason: ${reason}`,
                 `Required action: ${recommendedAction}`,
+                ...(issueType === 'UNKNOWN_PACKAGE' ? [
+                    'PACKAGE AUTO-RECOVERY RESULT:',
+                    unknownPackageAutoApproval?.status === 'auto_approved' || unknownPackageAutoApproval?.status === 'already_present'
+                        ? `Verified on Google Play and ${unknownPackageAutoApproval.status === 'auto_approved' ? 'added automatically' : 'already present'}: ${unknownPackageAutoApproval.platform || ''} / ${packageName} / config v${unknownPackageAutoApproval.configVersion || ''}`
+                        : `Not auto-approved: ${unknownPackageAutoApproval?.status || 'manual_review_required'}. No unverified package was added.`,
+                    ...(unknownPackageAutoApproval?.status === 'auto_approved' || unknownPackageAutoApproval?.status === 'already_present' ? [] : [
+                        'After manual verification, call POST /api/admin/platform/package/add',
+                        `JSON body: {\"platform\":\"<Uber|Ola|Rapido|Namma Yatri>\",\"packageName\":\"${packageName}\"}`,
+                        'Authorization: Bearer <ADMIN_TOKEN> (keep token private).'
+                    ])
+                ] : []),
                 `Time: ${new Date().toISOString()}`
             ].join('\n');
 
@@ -1509,6 +1564,434 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         console.error('COMPATIBILITY REPORT ERROR:', error.message || error);
         return res.status(500).json({ success: false, message: 'Unable to record compatibility report.' });
     }
+});
+
+// ============================================================
+// GOOGLE PLAY PACKAGE DISCOVERY + VERIFIED AUTO-APPROVAL
+// The monitor checks official Google Play developer pages and Play Store search
+// pages. A candidate is auto-added only when its individual Google Play listing
+// matches BOTH a configured platform title pattern and an exact publisher alias.
+// This is Play listing/publisher verification, NOT Android signing-certificate
+// verification. Ambiguous results are never auto-approved; they trigger Telegram.
+const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri'];
+const PLAY_STORE_MONITOR_DEFAULTS = {
+    Uber: {
+        developerUrl: 'https://play.google.com/store/apps/dev?id=7908612043055486674',
+        searchUrl: 'https://play.google.com/store/search?q=Uber%20Driver&c=apps',
+        publisherAliases: ['Uber Technologies, Inc.'],
+        titleGroups: [['uber', 'driver']],
+        brandTokens: ['uber']
+    },
+    Ola: {
+        developerUrl: 'https://play.google.com/store/apps/developer?id=Ola+%28ANI+TECHNOLOGIES+PRIVATE+LIMITED%29',
+        searchUrl: 'https://play.google.com/store/search?q=Ola%20Driver&c=apps',
+        publisherAliases: ['Ola (ANI TECHNOLOGIES PRIVATE LIMITED)', 'ANI TECHNOLOGIES PRIVATE LIMITED'],
+        titleGroups: [['ola', 'driver']],
+        brandTokens: ['ola']
+    },
+    Rapido: {
+        developerUrl: 'https://play.google.com/store/apps/developer?id=Rapido+Bike+Taxi',
+        searchUrl: 'https://play.google.com/store/search?q=Rapido%20Captain%20Driver&c=apps',
+        publisherAliases: ['Rapido Bike Taxi', 'ROPPEN TRANSPORTATION SERVICES PRIVATE LIMITED'],
+        titleGroups: [['rapido', 'captain'], ['rapido', 'driver']],
+        brandTokens: ['rapido']
+    },
+    'Namma Yatri': {
+        developerUrl: 'https://play.google.com/store/apps/dev?id=9166297176297744140',
+        searchUrl: 'https://play.google.com/store/search?q=Namma%20Yatri%20Driver%20Partner&c=apps',
+        publisherAliases: ['Moving Tech', 'MOVING TECH INNOVATIONS PRIVATE LIMITED'],
+        titleGroups: [['yatri', 'driver'], ['namma', 'yatri', 'driver']],
+        brandTokens: ['yatri', 'namma']
+    }
+};
+
+function parsePlayStoreMonitorConfig() {
+    let overrides = {};
+    try {
+        const raw = String(process.env.PLAY_STORE_MONITOR_CONFIG || '').trim();
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) overrides = parsed;
+            else console.error('PLAY_STORE_MONITOR_CONFIG must be a JSON object. Using built-in defaults.');
+        }
+    } catch (error) {
+        console.error('PLAY_STORE_MONITOR_CONFIG JSON is invalid. Using built-in defaults:', error.message || error);
+    }
+    const result = {};
+    for (const platformName of PLAY_STORE_PLATFORMS) {
+        const defaults = PLAY_STORE_MONITOR_DEFAULTS[platformName];
+        const override = overrides[platformName] && typeof overrides[platformName] === 'object' ? overrides[platformName] : {};
+        result[platformName] = {
+            ...defaults,
+            ...override,
+            publisherAliases: Array.isArray(override.publisherAliases) && override.publisherAliases.length
+                ? override.publisherAliases.map(value => String(value).trim()).filter(Boolean)
+                : defaults.publisherAliases,
+            titleGroups: Array.isArray(override.titleGroups) && override.titleGroups.length
+                ? override.titleGroups
+                : defaults.titleGroups,
+            brandTokens: Array.isArray(override.brandTokens) && override.brandTokens.length
+                ? override.brandTokens.map(value => normalizePublisherText(value)).filter(Boolean)
+                : defaults.brandTokens
+        };
+    }
+    return result;
+}
+
+function htmlToPlainText(value) {
+    return String(value || '')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"')
+        .replace(/&#39;|&apos;/gi, "'").replace(/&nbsp;/gi, ' ')
+        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
+        .replace(/\s+/g, ' ').trim();
+}
+function normalizePublisherText(value) {
+    return htmlToPlainText(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function safeGooglePlayUrl(value, allowedPaths) {
+    try {
+        const parsed = new URL(String(value || '').trim());
+        if (parsed.protocol !== 'https:' || parsed.hostname !== 'play.google.com') return null;
+        if (!allowedPaths.some(path => parsed.pathname === path)) return null;
+        return parsed.toString();
+    } catch (_) { return null; }
+}
+function extractPlayStoreCandidates(html, sourceUrl) {
+    const source = String(html || '').replace(/&amp;/g, '&').replace(/\\u0026/g, '&');
+    const output = new Map();
+    const re = /\/store\/apps\/details\?[^"'<>\s]*?\bid=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)/gi;
+    let match;
+    while ((match = re.exec(source)) !== null) {
+        const packageName = match[1];
+        if (!output.has(packageName)) output.set(packageName, { packageName, sourceUrl: String(sourceUrl || '') });
+        if (output.size >= 80) break;
+    }
+    return [...output.values()];
+}
+function extractTagText(html, tagName) {
+    const match = String(html || '').match(new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
+    return match ? htmlToPlainText(match[1]) : '';
+}
+function extractMetaContent(html, key) {
+    const tags = String(html || '').match(/<meta\b[^>]*>/gi) || [];
+    for (const tag of tags) {
+        const keyMatch = tag.match(/(?:property|name)=["']([^"']+)["']/i);
+        const contentMatch = tag.match(/content=["']([^"']*)["']/i);
+        if (keyMatch && contentMatch && keyMatch[1].toLowerCase() === String(key).toLowerCase()) {
+            return htmlToPlainText(contentMatch[1]);
+        }
+    }
+    return '';
+}
+function extractGooglePlayTitle(html) {
+    return extractTagText(html, 'h1') || extractMetaContent(html, 'og:title') ||
+        extractTagText(html, 'title').replace(/\s*-\s*Apps on Google Play$/i, '').trim();
+}
+function extractGooglePlayPublisher(html, publisherAliases) {
+    const source = String(html || '');
+    const h1 = source.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i);
+    const headerRegion = h1 ? source.slice(h1.index + h1[0].length, h1.index + h1[0].length + 5000) : source.slice(0, 7000);
+    const linkPattern = /<a\b[^>]*href=["'][^"']*\/store\/apps\/(?:dev|developer)\?[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const publisherLinks = [];
+    let linkMatch;
+    while ((linkMatch = linkPattern.exec(headerRegion)) !== null) {
+        const label = htmlToPlainText(linkMatch[1]);
+        if (label) publisherLinks.push(label);
+    }
+    const aliases = publisherAliases.map(value => normalizePublisherText(value)).filter(Boolean);
+    for (const label of publisherLinks) {
+        const normalized = normalizePublisherText(label);
+        if (aliases.some(alias => normalized === alias || normalized.includes(alias))) return label;
+    }
+    // Only use page-text fallback when the listing has no publisher profile link
+    // in its header. If a publisher link exists but is different, fail closed.
+    if (publisherLinks.length > 0) return '';
+    const pageText = normalizePublisherText(source);
+    for (let i = 0; i < publisherAliases.length; i++) {
+        if (aliases[i] && pageText.includes(aliases[i])) return publisherAliases[i];
+    }
+    return '';
+}
+function titleMatchesPlatform(title, titleGroups) {
+    const normalized = normalizePublisherText(title);
+    if (!normalized) return false;
+    return titleGroups.some(group => Array.isArray(group) && group.length > 0 &&
+        group.every(token => normalized.includes(normalizePublisherText(token))));
+}
+function titleLooksLikePlatformDriverApp(title, brandTokens) {
+    const normalized = normalizePublisherText(title);
+    const brandPresent = brandTokens.some(token => normalized.includes(token));
+    const rolePresent = ['driver', 'captain', 'partner', 'fleet'].some(token => normalized.includes(token));
+    return brandPresent && rolePresent;
+}
+async function fetchGooglePlayHtml(url) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'play.google.com') throw new Error('Only official HTTPS Google Play URLs are allowed.');
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; DriverRidePickerCompatibilityMonitor/1.1)',
+            'Accept': 'text/html,application/xhtml+xml',
+            'Accept-Language': 'en-IN,en;q=0.9'
+        },
+        signal: AbortSignal.timeout(12000)
+    });
+    const finalUrl = new URL(response.url || url);
+    if (finalUrl.hostname !== 'play.google.com') throw new Error('Google Play redirected outside play.google.com.');
+    if (!response.ok) throw new Error(`Google Play returned HTTP ${response.status}.`);
+    const html = await response.text();
+    if (html.length < 500) throw new Error('Google Play returned an unexpectedly short page.');
+    return html;
+}
+async function verifyPlayStoreCandidate(platformName, candidate, setting) {
+    const packageName = String(candidate.packageName || '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
+        return { packageName, verified: false, reason: 'invalid_package_id' };
+    }
+    const detailUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageName)}&hl=en_IN`;
+    try {
+        const html = await fetchGooglePlayHtml(detailUrl);
+        const title = extractGooglePlayTitle(html);
+        const publisher = extractGooglePlayPublisher(html, setting.publisherAliases);
+        const titleMatch = titleMatchesPlatform(title, setting.titleGroups);
+        const publisherMatch = !!publisher;
+        return {
+            packageName, title, publisher, titleMatch, publisherMatch,
+            verified: titleMatch && publisherMatch,
+            sourceUrl: candidate.sourceUrl,
+            detailUrl,
+            reason: titleMatch && publisherMatch ? 'exact_platform_title_and_publisher_match' :
+                (!publisherMatch && titleMatch ? 'title_matches_but_publisher_does_not' :
+                (publisherMatch && !titleMatch ? 'publisher_matches_but_title_needs_review' : 'title_and_publisher_not_verified'))
+        };
+    } catch (error) {
+        return { packageName, verified: false, reason: `detail_page_check_failed: ${String(error.message || error).slice(0, 140)}`, sourceUrl: candidate.sourceUrl, detailUrl };
+    }
+}
+async function tryAutoApproveReportedUnknownPackage(packageName) {
+    const safePackage = String(packageName || '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(safePackage)) return { status: 'invalid_package_id' };
+    const cacheKey = `play-package-unknown-check:${safePackage}`;
+    const cachedRaw = await redis.get(cacheKey);
+    if (cachedRaw) {
+        const cached = typeof cachedRaw === 'string' ? JSON.parse(cachedRaw) : cachedRaw;
+        if (cached && Number(cached.checkedAtMs || 0) > Date.now() - 6 * 60 * 60 * 1000) {
+            return { ...cached, cached: true };
+        }
+    }
+    const monitor = parsePlayStoreMonitorConfig();
+    const checks = await Promise.all(PLAY_STORE_PLATFORMS.map(platformName =>
+        verifyPlayStoreCandidate(platformName, { packageName: safePackage, sourceUrl: 'android_unknown_package_telemetry' }, monitor[platformName])
+    ));
+    const matches = checks.filter(item => item.verified);
+    let result;
+    if (matches.length === 1) {
+        const candidate = matches[0];
+        const platformName = PLAY_STORE_PLATFORMS.find(name =>
+            verifyPlayStoreTitleAndPublisherMatch(name, candidate, monitor[name])
+        );
+        if (!platformName) {
+            result = { status: 'manual_review_required', packageName: safePackage, checks };
+        } else {
+            const saved = await addVerifiedPackageToRemoteConfig(platformName, safePackage, {
+                source: 'android_unknown_package_telemetry_verified_on_google_play',
+                publisher: candidate.publisher,
+                title: candidate.title,
+                detailUrl: candidate.detailUrl,
+                verification: 'exact_platform_title_and_publisher_match'
+            });
+            result = { status: saved.added ? 'auto_approved' : 'already_present', platform: platformName, packageName: safePackage, configVersion: saved.version, title: candidate.title, publisher: candidate.publisher };
+        }
+    } else if (matches.length > 1) {
+        result = { status: 'manual_review_required_multiple_platforms', packageName: safePackage, checks };
+    } else {
+        result = { status: 'manual_review_required', packageName: safePackage, checks };
+    }
+    result.checkedAtMs = Date.now();
+    await redis.set(cacheKey, JSON.stringify(result), { ex: 21600 });
+    return result;
+}
+function verifyPlayStoreTitleAndPublisherMatch(platformName, candidate, setting) {
+    return !!setting && titleMatchesPlatform(candidate.title, setting.titleGroups) &&
+        !!candidate.publisher && setting.publisherAliases.some(alias =>
+            normalizePublisherText(candidate.publisher) === normalizePublisherText(alias) ||
+            normalizePublisherText(candidate.publisher).includes(normalizePublisherText(alias))
+        );
+}
+
+async function runWithConcurrency(items, limit, worker) {
+    const output = new Array(items.length);
+    let nextIndex = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+        while (true) {
+            const index = nextIndex++;
+            if (index >= items.length) return;
+            output[index] = await worker(items[index], index);
+        }
+    });
+    await Promise.all(workers);
+    return output;
+}
+async function getCurrentPlatformPackageNames(platformName) {
+    const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
+    const parsed = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
+    const merged = mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, parsed);
+    const values = merged.platforms?.[platformName]?.package_names;
+    return new Set(Array.isArray(values) ? values.map(value => String(value).trim()) : []);
+}
+async function addVerifiedPackageToRemoteConfig(platformName, packageName, verification) {
+    const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
+    const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
+    const merged = mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous);
+    const platformConfig = { ...(merged.platforms?.[platformName] || {}) };
+    const current = Array.isArray(platformConfig.package_names) ? platformConfig.package_names : [];
+    if (current.includes(packageName)) return { added: false, version: await getRideBotConfigVersion() };
+    platformConfig.package_names = [...new Set([...current, packageName])];
+    merged.platforms = { ...merged.platforms, [platformName]: platformConfig };
+    await redis.set(RIDE_BOT_CONFIG_DATA_KEY, JSON.stringify(merged));
+    const previousVersion = await getRideBotConfigVersion();
+    const version = previousVersion + 1;
+    await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(version));
+    await redis.set(`play-package-verified:${platformName}:${packageName}`, JSON.stringify({
+        ...verification, verifiedAt: new Date().toISOString(), configVersion: version
+    }), { ex: 31536000 });
+    return { added: true, previousVersion, version };
+}
+async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence) {
+    const key = `play-package-review:${platformName}`;
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ reason, evidence })).digest('hex');
+    const oldRaw = await redis.get(key);
+    const old = oldRaw ? (typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw) : {};
+    const now = Date.now();
+    if (old.fingerprint === fingerprint && now - Number(old.lastAttemptAt || 0) < 24 * 60 * 60 * 1000) {
+        return { sent: false, suppressed: true };
+    }
+    const candidates = evidence.slice(0, 12).map(item =>
+        `${item.packageName || 'unknown'} | ${item.title || item.reason || 'title unavailable'} | publisher=${item.publisher || 'unverified'}`
+    );
+    const message = [
+        '⚠️ DRIVER RIDE PICKER — GOOGLE PLAY PACKAGE REVIEW REQUIRED',
+        `Platform: ${platformName}`,
+        `Reason: ${reason}`,
+        `Expected publisher: ${setting.publisherAliases.join(' OR ')}`,
+        `Expected title rules: ${JSON.stringify(setting.titleGroups)}`,
+        `Publisher page: ${setting.developerUrl}`,
+        `Search page: ${setting.searchUrl}`,
+        `Candidates:\n${candidates.join('\n') || 'No package candidates found.'}`,
+        'No unverified package was added. Manual approval endpoint: POST /api/admin/platform/package/add',
+        'Authorization: Bearer <ADMIN_TOKEN> (keep the token private).',
+        `Time: ${new Date().toISOString()}`
+    ].join('\n');
+    let result = { sent: false, reason: 'Telegram is not configured.' };
+    try { result = await sendTelegramMessage(message); }
+    catch (error) { result = { sent: false, reason: String(error.message || error).slice(0, 180) }; }
+    await redis.set(key, JSON.stringify({ fingerprint, lastAttemptAt: now, telegramSent: !!result.sent, reason }), { ex: 7776000 });
+    return result;
+}
+async function runPlayStorePackageDiscovery() {
+    const monitor = parsePlayStoreMonitorConfig();
+    const results = [];
+    for (const platformName of PLAY_STORE_PLATFORMS) {
+        const setting = monitor[platformName];
+        const developerUrl = safeGooglePlayUrl(setting.developerUrl, ['/store/apps/dev', '/store/apps/developer']);
+        const searchUrl = safeGooglePlayUrl(setting.searchUrl, ['/store/search']);
+        if (!developerUrl || !searchUrl || !setting.publisherAliases.length || !setting.titleGroups.length) {
+            results.push({ platform: platformName, status: 'invalid_monitor_settings' });
+            continue;
+        }
+        try {
+            const sourceResults = await Promise.allSettled([fetchGooglePlayHtml(developerUrl), fetchGooglePlayHtml(searchUrl)]);
+            const sourceErrors = sourceResults.filter(item => item.status === 'rejected').map(item => String(item.reason?.message || item.reason).slice(0, 150));
+            const candidatesByPackage = new Map();
+            for (let i = 0; i < sourceResults.length; i++) {
+                const item = sourceResults[i];
+                if (item.status !== 'fulfilled') continue;
+                const url = i === 0 ? developerUrl : searchUrl;
+                for (const candidate of extractPlayStoreCandidates(item.value, url)) {
+                    if (!candidatesByPackage.has(candidate.packageName)) candidatesByPackage.set(candidate.packageName, candidate);
+                }
+            }
+            const allCandidates = [...candidatesByPackage.values()];
+            const currentPackages = await getCurrentPlatformPackageNames(platformName);
+            const newCandidates = allCandidates.filter(item => !currentPackages.has(item.packageName)).slice(0, 16);
+            if (newCandidates.length === 0) {
+                if (sourceErrors.length === 2) {
+                    const evidence = [{ packageName: '', reason: sourceErrors.join(' / ') }];
+                    const telegram = await sendPlayStoreReviewAlert(platformName, setting, 'Both official Google Play source pages could not be read.', evidence);
+                    results.push({ platform: platformName, status: 'source_check_failed', telegramSent: !!telegram.sent, errors: sourceErrors });
+                } else {
+                    results.push({ platform: platformName, status: 'no_change', candidateCount: allCandidates.length, sourceWarnings: sourceErrors });
+                }
+                continue;
+            }
+            const checks = await runWithConcurrency(newCandidates, 4, candidate => verifyPlayStoreCandidate(platformName, candidate, setting));
+            const verified = checks.filter(item => item.verified);
+            if (verified.length === 1) {
+                const candidate = verified[0];
+                const saved = await addVerifiedPackageToRemoteConfig(platformName, candidate.packageName, {
+                    source: 'official_google_play_developer_and_search_pages',
+                    publisher: candidate.publisher,
+                    title: candidate.title,
+                    sourceUrl: candidate.sourceUrl,
+                    detailUrl: candidate.detailUrl,
+                    verification: candidate.reason
+                });
+                const message = [
+                    '✅ DRIVER RIDE PICKER — VERIFIED PACKAGE AUTO-ADDED',
+                    `Platform: ${platformName}`,
+                    `App: ${candidate.title}`,
+                    `Publisher: ${candidate.publisher}`,
+                    `New package ID: ${candidate.packageName}`,
+                    `Remote config version: ${saved.version}`,
+                    'Compatible installed APKs can receive this package on their next remote-config refresh.',
+                    `Time: ${new Date().toISOString()}`
+                ].join('\n');
+                try { await sendTelegramMessage(message); } catch (error) { console.error('PLAY STORE SUCCESS TELEGRAM ERROR:', error.message || error); }
+                results.push({ platform: platformName, packageName: candidate.packageName, status: saved.added ? 'auto_approved' : 'already_present', configVersion: saved.version, title: candidate.title, publisher: candidate.publisher });
+            } else if (verified.length > 1) {
+                const telegram = await sendPlayStoreReviewAlert(platformName, setting, 'More than one new listing passed title and publisher checks; automatic selection is unsafe.', verified);
+                results.push({ platform: platformName, status: 'manual_review_required_multiple_verified', verifiedCount: verified.length, telegramSent: !!telegram.sent });
+            } else {
+                const possible = checks.filter(item => item.publisherMatch || (item.titleMatch && titleLooksLikePlatformDriverApp(item.title, setting.brandTokens)));
+                if (possible.length > 0 || sourceErrors.length > 0) {
+                    const reason = possible.length > 0
+                        ? 'A possible replacement listing was found, but it did not pass both title and publisher checks.'
+                        : 'Google Play source results were incomplete; no candidate could be verified.';
+                    const telegram = await sendPlayStoreReviewAlert(platformName, setting, reason, possible.length ? possible : checks.slice(0, 12));
+                    results.push({ platform: platformName, status: 'manual_review_required', reviewedCount: checks.length, telegramSent: !!telegram.sent, sourceWarnings: sourceErrors });
+                } else {
+                    results.push({ platform: platformName, status: 'no_verified_replacement', reviewedCount: checks.length, sourceWarnings: sourceErrors });
+                }
+            }
+        } catch (error) {
+            const evidence = [{ packageName: '', reason: String(error.message || error).slice(0, 160) }];
+            let telegram = { sent: false };
+            try { telegram = await sendPlayStoreReviewAlert(platformName, setting, 'The package discovery check failed unexpectedly.', evidence); } catch (_) {}
+            results.push({ platform: platformName, status: 'check_failed', error: String(error.message || error).slice(0, 180), telegramSent: !!telegram.sent });
+        }
+    }
+    return { success: true, checkedAt: new Date().toISOString(), results };
+}
+app.get('/api/cron/play-store-package-discovery', async (req, res) => {
+    const expected = String(process.env.CRON_SECRET || '');
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!expected || !supplied || !safeEqualHex(sha512(expected), sha512(supplied))) {
+        return res.status(401).json({ success: false, message: 'Unauthorized cron request.' });
+    }
+    try { return res.json(await runPlayStorePackageDiscovery()); }
+    catch (error) {
+        console.error('PLAY STORE PACKAGE DISCOVERY ERROR:', error.message || error);
+        return res.status(500).json({ success: false, message: 'Play Store package discovery failed.' });
+    }
+});
+app.post('/api/admin/play-store-package-discovery/run', async (req, res) => {
+    if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    try { return res.json(await runPlayStorePackageDiscovery()); }
+    catch (error) { return res.status(500).json({ success: false, message: 'Play Store package discovery failed.' }); }
 });
 
 // Vercel Cron calls this endpoint. Set CRON_SECRET; never expose it in the APK.
