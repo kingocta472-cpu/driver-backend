@@ -145,7 +145,7 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 // CONFIG ✅ TIME BASED SYSTEM
 // ============================================================
-const TRIAL_DURATION_MS = 48 * 60 * 60 * 1000; // 48 Hours
+const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000; // 24 Hours — new users only
 const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000;
 
 const DAILY_PLAN_AMOUNT = 15;
@@ -186,7 +186,7 @@ const APP_MINIMUM_VERSION = '1.18.0';
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.18.0) install karein.';
-const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 48 Hours Free Trial Promo, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -339,12 +339,13 @@ function verifyRazorpaySignature(orderId, paymentId, signature) {
 // Keep secrets in Vercel Environment Variables only.
 // ============================================================
 const RIDE_BOT_CONFIG_DATA_KEY = 'ride-bot-config-data';
+const BLOCKED_DRIVER_PACKAGE_IDS = new Set(['in.juspay.nammayatri']);
 const DEFAULT_RIDE_BOT_CONFIG = {
     platforms: {
         Uber: { package_names: ["com.ubercab.driver"], accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "match", "confirm"] },
         Ola: { package_names: ["com.olacabs.driver", "com.olacabs.oladriver"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "otp submit", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         Rapido: { package_names: ["com.rapido.driver", "com.rapido.rider"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
-        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatri", "in.juspay.nammayatripartner", "com.nammayatri"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
+        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
     global: {
         max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000,
@@ -422,33 +423,19 @@ function maskedPhoneForMessage(phone) {
     return normalized ? `${normalized.slice(0, 2)}******${normalized.slice(-2)}` : '**********';
 }
 async function notifyNewRegistrationIfNeeded(phone, isNewUser) {
-    const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-    const chatId = String(process.env.TELEGRAM_CHAT_ID || '').trim();
-    if (!token || !chatId) return;
-    const db = getDB();
-    const eventRef = db.collection('telegramEvents').doc(`registration_${hashPhoneForAuth(phone)}`);
-    let claimed = false;
+    // Registration notices are queued for the consolidated 30-minute report.
+    // Do not send one Telegram message per new driver.
+    if (!isNewUser) return;
     try {
-        await db.runTransaction(async transaction => {
-            const snapshot = await transaction.get(eventRef);
-            const now = Date.now();
-            if (!snapshot.exists) {
-                if (!isNewUser) return;
-                transaction.create(eventRef, { type: 'new_registration', phoneHash: hashPhoneForAuth(phone), status: 'sending', leaseUntilMs: now + 60000, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-                claimed = true;
-                return;
-            }
-            const data = snapshot.data() || {};
-            if (data.status === 'sent' || Number(data.leaseUntilMs || 0) > now) return;
-            transaction.update(eventRef, { status: 'sending', leaseUntilMs: now + 60000, lastAttemptAt: admin.firestore.FieldValue.serverTimestamp() });
-            claimed = true;
-        });
-        if (!claimed) return;
-        await sendTelegramMessage(`🆕 Driver Ride Picker — New Registration\nDriver: ${maskedPhoneForMessage(phone)}\nTime: ${new Date().toISOString()}`);
-        await eventRef.set({ status: 'sent', sentAt: admin.firestore.FieldValue.serverTimestamp(), leaseUntilMs: 0 }, { merge: true });
+        const eventRef = getDB().collection('telegramEvents').doc(`registration_${hashPhoneForAuth(phone)}`);
+        await eventRef.set({
+            type: 'new_registration',
+            phoneHash: hashPhoneForAuth(phone),
+            status: 'queued_for_digest',
+            createdAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
     } catch (error) {
-        try { await eventRef.set({ status: 'pending', leaseUntilMs: 0, lastError: String(error.message || error).slice(0, 200) }, { merge: true }); } catch (_) {}
-        console.error('REGISTRATION TELEGRAM ERROR:', error.message || error);
+        console.error('REGISTRATION DIGEST QUEUE ERROR:', error.message || error);
     }
 }
 function mergeConfigObjects(base, override) {
@@ -463,7 +450,7 @@ function mergeConfigObjects(base, override) {
             merged.platforms[name].package_names = [...new Set([
                 ...(Array.isArray(basePlatform.package_names) ? basePlatform.package_names : []),
                 ...(Array.isArray(overridePlatform.package_names) ? overridePlatform.package_names : [])
-            ])];
+            ])].filter(packageName => !BLOCKED_DRIVER_PACKAGE_IDS.has(String(packageName).trim()));
         }
     }
     merged.global = { ...base.global, ...(override.global || {}) };
@@ -531,11 +518,6 @@ function validateRemoteRideConfig(input) {
                 output.filters[field] = value;
             }
         }
-        if (input.filters.keyword_mode !== undefined) {
-            const mode = String(input.filters.keyword_mode).trim().toUpperCase();
-            if (!['ANY', 'ALL'].includes(mode)) throw new Error('filters.keyword_mode must be ANY or ALL.');
-            output.filters.keyword_mode = mode;
-        }
         const listFields = ['allowed_vehicles', 'target_areas', 'blocked_areas', 'required_keywords', 'blocked_keywords'];
         for (const field of listFields) {
             if (input.filters[field] !== undefined) {
@@ -564,8 +546,7 @@ function validateRemoteRideConfig(input) {
             debounce_normal_ms: [1, 500],
             debounce_slow_ms: [1, 500],
             location_min_time_ms: [1000, 60000],
-            location_min_distance_m: [1, 1000],
-            plan_offline_grace_ms: [0, 1800000]
+            location_min_distance_m: [1, 1000]
         };
         for (const [field, [min, max]] of Object.entries(limits)) {
             if (input.global[field] !== undefined) {
@@ -581,8 +562,7 @@ function validateRemoteRideConfig(input) {
                     debounce_normal_ms: 'debounceNormalMs',
                     debounce_slow_ms: 'debounceSlowMs',
                     location_min_time_ms: 'locationMinTimeMs',
-                    location_min_distance_m: 'locationMinDistanceM',
-                    plan_offline_grace_ms: 'planOfflineGraceMs'
+                    location_min_distance_m: 'locationMinDistanceM'
                 };
                 output.global[aliases[field]] = value;
             }
@@ -599,14 +579,10 @@ function validateRemoteRideConfig(input) {
             const item = input.strategies[name];
             if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(`Invalid strategy: ${name}`);
             const clean = {};
-            const numericFields = ['attempts', 'tapIntervalMs', 'verifyDelayMs'];
-            // The installed service has a separate slow-device fallback for Strategy 3.
-            // These values are accepted only for high_speed; Strategy 1 stays locked above.
-            if (name === 'high_speed') numericFields.push('attemptsSlow', 'verifyDelaySlowMs');
-            for (const field of numericFields) {
+            for (const field of ['attempts', 'tapIntervalMs', 'verifyDelayMs']) {
                 if (item[field] !== undefined) {
                     const n = Number(item[field]);
-                    const [min, max] = field === 'attempts' || field === 'attemptsSlow' ? [1, 20] : [5, 1000];
+                    const [min, max] = field === 'attempts' ? [1, 20] : [5, 1000];
                     if (!Number.isInteger(n) || n < min || n > max) throw new Error(`Invalid strategies.${name}.${field}`);
                     clean[field] = n;
                 }
@@ -800,6 +776,7 @@ app.post('/api/admin/platform/package/add', async (req, res) => {
         const packagePattern = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
         if (!allowedPlatforms.includes(platformName)) return res.status(400).json({ success: false, message: 'Invalid platform. Use Uber, Ola, Rapido, or Namma Yatri.' });
         if (!packagePattern.test(packageName) || packageName.length > 180) return res.status(400).json({ success: false, message: 'Invalid Android package name.' });
+        if (BLOCKED_DRIVER_PACKAGE_IDS.has(packageName)) return res.status(400).json({ success: false, message: 'Passenger application package cannot be approved as a driver app.' });
 
         const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
         const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
@@ -942,36 +919,16 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 updates.pinSalt = pinData.pinSalt; updates.pinHash = pinData.pinHash; updates.pinCreatedAt = admin.firestore.FieldValue.serverTimestamp(); pinWasCreated = true;
             }
 
+            // Existing accounts never receive a new-user trial during migration.
+            // Mark legacy flags only; preserve planExpiry and every active plan exactly.
             if (!userData.migratedToTimeSystem) {
-                const now = Date.now(); const currentExpiry = Number(userData.planExpiry || 0);
-                updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS;
-                updates.migratedToTimeSystem = true; trialAdded = true;
+                updates.migratedToTimeSystem = true;
             }
 
-            // ✅ NAYA V18 PROMO LOGIC (PURANE USERS KE LIYE)
+            // Retire the old V18 existing-user promo without extending expiry.
+            // This prevents an old account from receiving a trial on a new device.
             if (!userData.v18PromoClaimed) {
-                const deviceTrialClaimRef = db.collection('deviceTrialClaims').doc(hashInstallId(trialDeviceId));
-                const deviceTrialDoc = await deviceTrialClaimRef.get();
-
-                if (!deviceTrialDoc.exists) {
-                    const now = Date.now();
-                    const currentExpiry = Number(userData.planExpiry || 0);
-                    updates.planExpiry = Math.max(currentExpiry, now) + TRIAL_DURATION_MS;
-                    updates.v18PromoClaimed = true;
-                    trialAdded = true;
-
-                    await deviceTrialClaimRef.set({
-                        deviceIdHash: hashInstallId(trialDeviceId),
-                        firstPhone: phone,
-                        hoursGranted: 48,
-                        promo: 'V18',
-                        createdAt: admin.firestore.FieldValue.serverTimestamp()
-                    });
-                    console.log(`V18 Promo 48H granted to existing user: ${phone} on new device`);
-                } else {
-                    updates.v18PromoClaimed = true;
-                    console.log(`V18 Promo BLOCKED for user: ${phone} (Device already claimed)`);
-                }
+                updates.v18PromoClaimed = true;
             }
 
             if (typeof userData.activePlan !== 'string') updates.activePlan = PLAN_TYPE_NONE;
@@ -1044,8 +1001,8 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 });
 
                 if (trialGranted) {
-                    transaction.set(trialClaimRef, { installIdHash: hashInstallId(installId), firstPhone: phone, hoursGranted: 48, createdAt: admin.firestore.FieldValue.serverTimestamp() });
-                    transaction.set(deviceTrialClaimRef, { deviceIdHash: hashInstallId(trialDeviceId), firstPhone: phone, hoursGranted: 48, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+                    transaction.set(trialClaimRef, { installIdHash: hashInstallId(installId), firstPhone: phone, hoursGranted: 24, createdAt: admin.firestore.FieldValue.serverTimestamp() });
+                    transaction.set(deviceTrialClaimRef, { deviceIdHash: hashInstallId(trialDeviceId), firstPhone: phone, hoursGranted: 24, createdAt: admin.firestore.FieldValue.serverTimestamp() });
                 }
 
                 if (referralApplied && referralLedgerRef && (!ledgerDoc || !ledgerDoc.exists)) {
@@ -1110,7 +1067,7 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
         let welcomeMessage;
         if (isNewUser) {
-            welcomeMessage = trialAdded ? `Welcome! 48 Hours Free Trial activated.` : 'Account created. This installation has already used the free trial.';
+            welcomeMessage = trialAdded ? `Welcome! 24 Hours Free Trial activated.` : 'Account created. This installation has already used the free trial.';
         } else {
             welcomeMessage = pinWasCreated ? 'PIN created successfully. Welcome back!' : 'Welcome back!';
         }
@@ -1408,11 +1365,20 @@ app.post('/api/telemetry/summary', verifyFirebaseToken, async (req, res) => {
             failCount = Math.max(0, total - successCount);
         }
         if (!Number.isSafeInteger(successCount) || successCount < 0 || successCount > 100000 || !Number.isSafeInteger(failCount) || failCount < 0 || failCount > 100000) return res.status(400).json({ success: false, message: 'Invalid telemetry counts.' });
+        const driverKey = hashPhoneForAuth(phone);
+        const reasons = Array.isArray(req.body.failReasons) ? req.body.failReasons.slice(0, 10).map(x => String(x).slice(0, 120)) : (typeof req.body.failReasons === 'string' && req.body.failReasons.trim() ? [req.body.failReasons.trim().slice(0, 1200)] : []);
+        const suppliedPeriodStart = Number(req.body.periodStartMs || 0);
+        if (Number.isSafeInteger(suppliedPeriodStart) && suppliedPeriodStart > 0 && suppliedPeriodStart <= Date.now() && Date.now() - suppliedPeriodStart <= 2 * 60 * 60 * 1000) {
+            const bucketStartMs = Math.floor(suppliedPeriodStart / (30 * 60 * 1000)) * (30 * 60 * 1000);
+            const halfHourKey = new Date(bucketStartMs).toISOString();
+            const reportRef = getDB().collection('driverHalfHourlyTelemetry').doc(`${driverKey}_${bucketStartMs}`);
+            await reportRef.set({ driverKey, halfHourKey, periodStartMs: bucketStartMs, successCount, failCount, failReasons: reasons, deviceInfo: String(req.body.deviceInfo || '').slice(0, 120), receivedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return res.json({ success: true, accepted: true, halfHourKey });
+        }
+        // Legacy APKs without periodStartMs retain the original hourly storage.
         const hourStart = new Date(); hourStart.setUTCMinutes(0, 0, 0);
         const hourKey = hourStart.toISOString();
-        const driverKey = hashPhoneForAuth(phone);
         const reportRef = getDB().collection('driverHourlyTelemetry').doc(`${driverKey}_${hourKey.replace(/[^0-9A-Za-z]/g, '')}`);
-        const reasons = Array.isArray(req.body.failReasons) ? req.body.failReasons.slice(0, 10).map(x => String(x).slice(0, 120)) : (typeof req.body.failReasons === 'string' && req.body.failReasons.trim() ? [req.body.failReasons.trim().slice(0, 1200)] : []);
         await reportRef.set({ driverKey, hourKey, successCount, failCount, failReasons: reasons, deviceInfo: String(req.body.deviceInfo || '').slice(0, 120), receivedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
         return res.json({ success: true, accepted: true, hourKey });
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to save telemetry summary.' }); }
@@ -1441,7 +1407,7 @@ app.post('/api/telemetry/alert', verifyFirebaseToken, async (req, res) => {
 
 // ------------------------------------------------------------
 // Detailed compatibility diagnostics.
-// Sends one Telegram alert per package/issue/device in each 30-minute window.
+// Stores and deduplicates issues for the consolidated 30-minute Telegram digest.
 // Raw screen contents, phone numbers, OTPs and passenger addresses are never accepted.
 // ------------------------------------------------------------
 app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) => {
@@ -1485,7 +1451,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             .update(`${packageName}|${issueType}|${deviceKey}|${windowBucket}`)
             .digest('hex');
         const reportRef = getDB().collection('compatibilityReports').doc(dedupeId);
-        let shouldSendTelegram = false;
+        let shouldSendTelegram = false; // Individual alerts are suppressed; digest sends one message.
 
         await getDB().runTransaction(async transaction => {
             const snapshot = await transaction.get(reportRef);
@@ -1504,12 +1470,12 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
                     recommendedAction,
                     driverKey: hashPhoneForAuth(getAuthenticatedPhone(req)),
                     reportedCount: 1,
-                    telegramStatus: 'sending',
-                    telegramLeaseUntilMs: now + 90000,
+                    telegramStatus: 'queued_for_digest',
+                    telegramLeaseUntilMs: 0,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     lastReportedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-                shouldSendTelegram = true;
+                shouldSendTelegram = false;
                 return;
             }
 
@@ -1522,7 +1488,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
                 lastReportedAt: admin.firestore.FieldValue.serverTimestamp(),
                 ...(retryAllowed ? { telegramStatus: 'sending', telegramLeaseUntilMs: now + 90000 } : {})
             });
-            shouldSendTelegram = retryAllowed;
+            shouldSendTelegram = false;
         });
 
         if (shouldSendTelegram) {
@@ -1611,8 +1577,8 @@ const PLAY_STORE_MONITOR_DEFAULTS = {
         developerUrl: 'https://play.google.com/store/apps/dev?id=9166297176297744140',
         searchUrl: 'https://play.google.com/store/search?q=Namma%20Yatri%20Driver%20Partner&c=apps',
         publisherAliases: ['Moving Tech', 'MOVING TECH INNOVATIONS PRIVATE LIMITED'],
-        titleGroups: [['yatri', 'driver'], ['namma', 'yatri', 'driver']],
-        brandTokens: ['yatri', 'namma']
+        titleGroups: [['yatri', 'driver'], ['namma', 'yatri', 'driver'], ['yatri', 'partner'], ['namma', 'yatri', 'partner'], ['mana', 'yatri', 'partner']],
+        brandTokens: ['yatri', 'namma', 'mana']
     }
 };
 
@@ -1759,6 +1725,7 @@ async function fetchGooglePlayHtml(url) {
     return html;
 }
 async function verifyPlayStoreCandidate(platformName, candidate, setting) {
+    if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(candidate?.packageName || '').trim())) return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: 'known_passenger_app_package' };
     const packageName = String(candidate.packageName || '').trim();
     if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
         return { packageName, verified: false, reason: 'invalid_package_id' };
@@ -1855,6 +1822,7 @@ async function getCurrentPlatformPackageNames(platformName) {
     return new Set(Array.isArray(values) ? values.map(value => String(value).trim()) : []);
 }
 async function addVerifiedPackageToRemoteConfig(platformName, packageName, verification) {
+    if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(packageName || '').trim())) throw new Error('Passenger application package cannot be added to driver config.');
     const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
     const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
     const merged = mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous);
@@ -2061,6 +2029,90 @@ app.get('/api/cron/hourly-summary', async (req, res) => {
         }
         return res.json({ success: true, processed });
     } catch (error) { console.error('HOURLY SUMMARY CRON ERROR:', error); return res.status(500).json({ success: false, message: 'Unable to generate hourly summary.' }); }
+});
+
+
+// Consolidated 30-minute report. Requires CRON_SECRET; one idempotent message per bucket.
+app.get('/api/cron/half-hour-summary', async (req, res) => {
+    const expected = String(process.env.CRON_SECRET || '');
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!expected || !supplied || !safeEqualHex(sha512(expected), sha512(supplied))) return res.status(401).json({ success: false, message: 'Unauthorized cron request.' });
+    try {
+        const db = getDB();
+        const nowMs = Date.now();
+        const bucketStartMs = Math.floor(nowMs / 1800000) * 1800000 - 1800000;
+        const halfHourKey = new Date(bucketStartMs).toISOString();
+        const runRef = db.collection('halfHourlySummaryRuns').doc(String(bucketStartMs));
+        let claimed = false;
+        await db.runTransaction(async tx => {
+            const snap = await tx.get(runRef);
+            const data = snap.exists ? (snap.data() || {}) : {};
+            if (data.status === 'sent' || Number(data.leaseUntilMs || 0) > nowMs) return;
+            tx.set(runRef, { status: 'sending', halfHourKey, leaseUntilMs: nowMs + 120000, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            claimed = true;
+        });
+        if (!claimed) return res.json({ success: true, skipped: true, halfHourKey });
+
+        const telemetry = await db.collection('driverHalfHourlyTelemetry').where('halfHourKey', '==', halfHourKey).get();
+        let success = 0, failed = 0;
+        telemetry.forEach(doc => { const d = doc.data() || {}; success += Math.max(0, Number(d.successCount || 0)); failed += Math.max(0, Number(d.failCount || 0)); });
+        const totalRides = success + failed;
+        const successPct = totalRides ? success * 100 / totalRides : 0;
+        const failPct = totalRides ? failed * 100 / totalRides : 0;
+
+        const usersSnap = await db.collection('users').count().get();
+        const totalDrivers = Math.max(0, Number(usersSnap.data().count || 0));
+        const cutoff = admin.firestore.Timestamp.fromMillis(nowMs - 5 * 60 * 1000);
+        const onlineSnap = await db.collection(TRACKER_COLLECTION).where('lastSeenAt', '>=', cutoff).count().get();
+        const online = Math.min(totalDrivers, Math.max(0, Number(onlineSnap.data().count || 0)));
+        const offline = Math.max(0, totalDrivers - online);
+
+        const startTs = admin.firestore.Timestamp.fromMillis(bucketStartMs);
+        const endTs = admin.firestore.Timestamp.fromMillis(bucketStartMs + 1800000);
+        const issues = await db.collection('compatibilityReports').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
+        const issueCounts = {};
+        issues.forEach(doc => { const d = doc.data() || {}; const k = String(d.issueType || 'OTHER'); issueCounts[k] = (issueCounts[k] || 0) + Math.max(1, Number(d.reportedCount || 1)); });
+        const issueText = Object.entries(issueCounts).map(([k,v]) => `${k}: ${v}`).join(', ') || 'None';
+        // Query only by timestamp to avoid requiring a new composite Firestore index.
+        const registrationWindow = await db.collection('telegramEvents')
+            .where('createdAt', '>=', startTs)
+            .where('createdAt', '<', endTs).get();
+        const newRegistrationCount = registrationWindow.docs.filter(doc =>
+            String((doc.data() || {}).type || '') === 'new_registration'
+        ).length;
+
+        const message = [
+            '📊 DRIVER RIDE PICKER — 30 MINUTE REPORT',
+            `Window (UTC): ${halfHourKey} — ${new Date(bucketStartMs + 1800000).toISOString()}`,
+            '',
+            '👥 DRIVER STATUS',
+            `Total registered: ${totalDrivers}`,
+            `🟢 Online (activity in last 5 min): ${online}`,
+            `🔴 Offline / not recently active: ${offline}`,
+            `🆕 New registrations in this window: ${newRegistrationCount}`,
+            '',
+            '🚕 RIDE PERFORMANCE',
+            `Drivers reporting: ${telemetry.size}`,
+            `Total recorded outcomes: ${totalRides}`,
+            `✅ Successful: ${success} (${successPct.toFixed(1)}%)`,
+            `❌ Failed: ${failed} (${failPct.toFixed(1)}%)`,
+            '',
+            `⚠️ Compatibility issues: ${issueText}`,
+            'Note: Online/offline is estimated from authenticated app activity. Percentages include only outcomes reported by compatible APKs.'
+        ].join('\n');
+        try {
+            const sent = await sendTelegramMessage(message);
+            if (!sent.sent) throw new Error(sent.reason || 'Telegram is not configured.');
+            await runRef.set({ status: 'sent', sentAt: admin.firestore.FieldValue.serverTimestamp(), leaseUntilMs: 0, successCount: success, failCount: failed, totalDrivers, onlineDrivers: online, offlineDrivers: offline, issueCounts }, { merge: true });
+            return res.json({ success: true, sent: true, halfHourKey, totalRides, totalDrivers, online, offline });
+        } catch (e) {
+            await runRef.set({ status: 'pending', leaseUntilMs: 0, lastError: String(e.message || e).slice(0, 200) }, { merge: true });
+            return res.status(502).json({ success: false, message: 'Telegram digest failed and can be retried.' });
+        }
+    } catch (error) {
+        console.error('HALF-HOUR SUMMARY ERROR:', error);
+        return res.status(500).json({ success: false, message: 'Unable to generate half-hour report.' });
+    }
 });
 
 app.post('/api/admin/telegram/test', async (req, res) => {
