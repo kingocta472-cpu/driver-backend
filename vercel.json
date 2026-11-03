@@ -12,19 +12,5 @@
       "src": "/(.*)",
       "dest": "index.js"
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/cron/play-store-package-discovery",
-      "schedule": "0 3 * * *"
-    },
-    {
-      "path": "/api/cron/half-hour-summary",
-      "schedule": "*/30 * * * *"
-    },
-    {
-      "path": "/api/cron/hourly-summary",
-      "schedule": "0 * * * *"
-    }
   ]
 }
