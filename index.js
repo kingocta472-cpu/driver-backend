@@ -129,7 +129,7 @@ async function getDriverTrackerSnapshot() {
 }
 async function handleDriverTrackerAdmin(req, res) {
     if (!verifyTrackerAdminKey(req)) return res.status(401).json({ success: false, message: 'Unauthorized tracker access.' });
-    try { return res.json(await getDriverTrackerSnapshot()); } 
+    try { return res.json(await getDriverTrackerSnapshot()); }
     catch (error) { return res.status(500).json({ success: false, message: 'Unable to load driver activity tracker.' }); }
 }
 
@@ -174,10 +174,10 @@ const PIN_LOCK_MINUTES = 15;
 // ✅ UPDATE VERSION HERE - v1.18.0
 const APP_LATEST_VERSION = '1.18.0';
 const APP_MINIMUM_VERSION = '1.18.0';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk'; 
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk';
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.18.0) install karein.';
-const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans';
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -357,7 +357,7 @@ async function sendTelegramMessage(message, replyMarkup = null) {
     const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
     const chatId = String(process.env.TELEGRAM_CHAT_ID || '').trim();
     if (!token || !chatId) return { sent: false, reason: 'Telegram is not configured.' };
-    
+
     const payload = { chat_id: chatId, text: message, disable_web_page_preview: true };
     if (replyMarkup) payload.reply_markup = replyMarkup;
 
@@ -387,6 +387,19 @@ async function notifyNewRegistrationIfNeeded(phone, isNewUser) {
         console.error('REGISTRATION DIGEST QUEUE ERROR:', error.message || error);
     }
 }
+
+// ============================================================
+// FIX 2: mergeStrategies helper (defined before mergeConfigObjects)
+// ============================================================
+function mergeStrategies(baseStrategies, overrideStrategies) {
+    const result = {};
+    const names = new Set([...Object.keys(baseStrategies || {}), ...Object.keys(overrideStrategies || {})]);
+    for (const name of names) {
+        result[name] = { ...((baseStrategies || {})[name] || {}), ...((overrideStrategies || {})[name] || {}) };
+    }
+    return result;
+}
+
 function mergeConfigObjects(base, override) {
     if (!override || typeof override !== 'object' || Array.isArray(override)) return base;
     const merged = { ...base, ...override };
@@ -404,12 +417,104 @@ function mergeConfigObjects(base, override) {
     }
     merged.global = { ...base.global, ...(override.global || {}) };
     merged.filters = { ...(base.filters || {}), ...(override.filters || {}) };
-    merged.strategies = {
-        ...base.strategies,
-        ...(override.strategies || {}),
-        normal: { ...(base.strategies?.normal || {}) }
-    };
+    // FIX 2: properly merge strategies (including `normal`) instead of ignoring override.normal.
+    merged.strategies = mergeStrategies(base.strategies, override.strategies);
     return merged;
+}
+
+// ============================================================
+// FIX 1: validateRemoteRideConfig — required by /api/admin/config/ride-bot
+// (was undefined earlier → admin config save always failed)
+// ============================================================
+const PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
+
+function validateRemoteRideConfig(input) {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Config must be a JSON object.');
+    const out = {};
+    const KEY_RE = /^[A-Za-z][A-Za-z0-9_]{0,59}$/;
+    const num = (value, min, max, name) => {
+        const n = Number(value);
+        if (value === null || value === '' || !Number.isFinite(n) || n < min || n > max) throw new Error(`${name} must be a number between ${min} and ${max}.`);
+        return n;
+    };
+    const strList = (value, name, maxItems = 60) => {
+        if (!Array.isArray(value) || value.length > maxItems) throw new Error(`${name} must be a list with at most ${maxItems} items.`);
+        return value.map(item => {
+            const s = String(item).trim();
+            if (!s || s.length > 100) throw new Error(`${name} has an empty or too long item.`);
+            return s;
+        });
+    };
+
+    if (input.platforms !== undefined) {
+        if (typeof input.platforms !== 'object' || Array.isArray(input.platforms) || !input.platforms) throw new Error('platforms must be an object.');
+        out.platforms = {};
+        for (const [name, cfg] of Object.entries(input.platforms)) {
+            if (!['Uber', 'Ola', 'Rapido', 'Namma Yatri'].includes(name)) throw new Error(`Unknown platform: ${name}`);
+            if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`platforms.${name} must be an object.`);
+            const p = {};
+            for (const [key, value] of Object.entries(cfg)) {
+                if (key === 'enabled') p.enabled = Boolean(value);
+                else if (key === 'package_names') {
+                    const list = strList(value, `${name}.package_names`, 30);
+                    for (const pkg of list) {
+                        if (!PKG_RE.test(pkg) || pkg.length > 180) throw new Error(`Invalid package name: ${pkg}`);
+                        if (BLOCKED_DRIVER_PACKAGE_IDS.has(pkg)) throw new Error('Passenger application package cannot be used as a driver app.');
+                    }
+                    p.package_names = [...new Set(list)];
+                } else if (['accept_keywords', 'acceptKeywords', 'success_signals', 'successSignals', 'view_id_patterns', 'viewIdPatterns'].includes(key)) {
+                    p[key] = strList(value, `${name}.${key}`);
+                } else throw new Error(`Unsupported platform setting: ${name}.${key}`);
+            }
+            out.platforms[name] = p;
+        }
+    }
+
+    if (input.global !== undefined) {
+        if (typeof input.global !== 'object' || Array.isArray(input.global) || !input.global) throw new Error('global must be an object.');
+        out.global = {};
+        for (const [key, value] of Object.entries(input.global)) {
+            if (!KEY_RE.test(key)) throw new Error(`Invalid global key: ${key}`);
+            out.global[key] = num(value, 1, 86400000, `global.${key}`);
+        }
+    }
+
+    if (input.filters !== undefined) {
+        if (typeof input.filters !== 'object' || Array.isArray(input.filters) || !input.filters) throw new Error('filters must be an object.');
+        out.filters = {};
+        for (const [key, value] of Object.entries(input.filters)) {
+            if (!KEY_RE.test(key)) throw new Error(`Invalid filter key: ${key}`);
+            if (typeof value === 'boolean') out.filters[key] = value;
+            else if (value === null) out.filters[key] = null;
+            else if (typeof value === 'number') out.filters[key] = num(value, 0, 1000000, `filters.${key}`);
+            else if (typeof value === 'string') {
+                if (value.length > 40) throw new Error(`filters.${key} is too long.`);
+                out.filters[key] = value;
+            } else if (Array.isArray(value)) out.filters[key] = strList(value, `filters.${key}`);
+            else throw new Error(`Unsupported filter value for ${key}.`);
+        }
+    }
+
+    if (input.strategies !== undefined) {
+        if (typeof input.strategies !== 'object' || Array.isArray(input.strategies) || !input.strategies) throw new Error('strategies must be an object.');
+        out.strategies = {};
+        for (const [name, cfg] of Object.entries(input.strategies)) {
+            if (!['normal', 'medium', 'high_speed'].includes(name)) throw new Error(`Unknown strategy: ${name}`);
+            if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`strategies.${name} must be an object.`);
+            const s = {};
+            for (const [key, value] of Object.entries(cfg)) {
+                if (['attempts', 'attemptsSlow', 'attempts_slow'].includes(key)) s[key] = Math.round(num(value, 1, 20, `${name}.${key}`));
+                else if (['tapIntervalMs', 'tap_interval_ms', 'verifyDelayMs', 'verify_delay_ms', 'verifyDelaySlowMs', 'verify_delay_slow_ms'].includes(key)) s[key] = Math.round(num(value, 5, 1000, `${name}.${key}`));
+                else if (key === 'tapMode') {
+                    const mode = String(value).toUpperCase();
+                    if (!['CENTER', 'GHOST'].includes(mode)) throw new Error('tapMode must be CENTER or GHOST.');
+                    s.tapMode = mode;
+                } else throw new Error(`Unsupported strategy setting: ${name}.${key}`);
+            }
+            out.strategies[name] = s;
+        }
+    }
+    return out;
 }
 
 // ✅ STRATEGY UPDATED: Normal 8, Medium 12
@@ -426,7 +531,8 @@ const DEFAULT_RIDE_BOT_CONFIG = {
     strategies: {
         normal: { attempts: 8, tapIntervalMs: 45, verifyDelayMs: 60, tapMode: 'CENTER' },
         medium: { attempts: 12, tapIntervalMs: 45, verifyDelayMs: 60, tapMode: 'CENTER' },
-        high_speed: { attempts: 10, tapIntervalMs: 15, verifyDelayMs: 10, tapMode: 'GHOST' }
+        // FIX 3: high_speed verifyDelayMs raised from 10 → 60 (old APKs need the extra time to react).
+        high_speed: { attempts: 10, tapIntervalMs: 15, verifyDelayMs: 60, tapMode: 'GHOST' }
     }
 };
 
@@ -617,7 +723,7 @@ app.post('/api/admin/platform/package/add', async (req, res) => {
 
 app.get('/api/admin/config/version', async (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
-    try { return res.json({ success: true, version: await getRideBotConfigVersion(), source: 'redis-or-env-fallback' }); } 
+    try { return res.json({ success: true, version: await getRideBotConfigVersion(), source: 'redis-or-env-fallback' }); }
     catch (error) { return res.status(500).json({ success: false, message: 'Unable to read config version.' }); }
 });
 
@@ -802,7 +908,7 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                     totalRides: 0, referralCode: newReferralCode, referredBy: referralApplied ? referrerPhone : null,
                     referralApplied, pinSalt: pinData.pinSalt, pinHash: pinData.pinHash, authMethod: 'pin',
                     trialClaimed: trialGranted, trialInstallIdHash: hashInstallId(installId), deviceIdHash: hashInstallId(trialDeviceId),
-                    migratedToTimeSystem: true, 
+                    migratedToTimeSystem: true,
                     v18PromoClaimed: true,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     pinCreatedAt: admin.firestore.FieldValue.serverTimestamp(), updatedAt: admin.firestore.FieldValue.serverTimestamp()
@@ -1633,7 +1739,7 @@ async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence)
     if (old.fingerprint === fingerprint && now - Number(old.lastAttemptAt || 0) < 24 * 60 * 60 * 1000) {
         return { sent: false, suppressed: true };
     }
-    
+
     // Find the most likely driver package to offer for approval
     let candidatePackage = "unknown";
     for (let item of evidence) {
@@ -1655,21 +1761,24 @@ async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence)
         `\n👇 Niche diye gaye button se approve karein (Agar yeh sahi app hai)`
     ].join('\n');
 
-    const replyMarkup = {
-        inline_keyboard: [
-            [
-                { text: "✅ Approve & Add", callback_data: `approve_pkg|${platformName}|${candidatePackage}` },
-                { text: "❌ Ignore", callback_data: `ignore_pkg` }
-            ]
-        ]
-    };
+    // FIX 5: Telegram callback_data hard limit is 64 bytes. If the combined string
+    // is too long (or the candidate is "unknown"), skip the inline keyboard so the
+    // alert message itself still gets delivered.
+    const approveData = `approve_pkg|${platformName}|${candidatePackage}`;
+    const canApprove = candidatePackage !== 'unknown' && Buffer.byteLength(approveData, 'utf8') <= 64;
+    const replyMarkup = canApprove ? {
+        inline_keyboard: [[
+            { text: "✅ Approve & Add", callback_data: approveData },
+            { text: "❌ Ignore", callback_data: 'ignore_pkg' }
+        ]]
+    } : null;
 
     let result = { sent: false, reason: 'Telegram is not configured.' };
-    try { 
-        result = await sendTelegramMessage(message, replyMarkup); 
+    try {
+        result = await sendTelegramMessage(message, replyMarkup);
     }
-    catch (error) { 
-        result = { sent: false, reason: String(error.message || error).slice(0, 180) }; 
+    catch (error) {
+        result = { sent: false, reason: String(error.message || error).slice(0, 180) };
     }
     await redis.set(key, JSON.stringify({ fingerprint, lastAttemptAt: now, telegramSent: !!result.sent, reason }), { ex: 7776000 });
     return result;
@@ -1843,7 +1952,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const bucketStartMs = Math.floor(nowMs / 1800000) * 1800000 - 1800000;
         const halfHourKey = new Date(bucketStartMs).toISOString();
         const hourKey = new Date(Math.floor(nowMs / 3600000) * 3600000).toISOString();
-        
+
         const runRef = db.collection('halfHourlySummaryRuns').doc(String(bucketStartMs));
         let claimed = false;
         await db.runTransaction(async tx => {
@@ -1868,7 +1977,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
                 success += Math.max(0, Number(d.successCount || 0));
                 failed += Math.max(0, Number(d.failCount || 0));
                 reportingDrivers.add(d.driverKey);
-                
+
                 if (d.failReasons) {
                     let rArr = Array.isArray(d.failReasons) ? d.failReasons : String(d.failReasons).split(', ');
                     rArr.forEach(r => {
@@ -1901,7 +2010,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const issueCounts = {};
         issues.forEach(doc => { const d = doc.data() || {}; const k = String(d.issueType || 'OTHER'); issueCounts[k] = (issueCounts[k] || 0) + Math.max(1, Number(d.reportedCount || 1)); });
         const issueText = Object.entries(issueCounts).map(([k,v]) => `${k}: ${v}`).join(', ') || 'None';
-        
+
         const registrationWindow = await db.collection('telegramEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
         const newRegistrationCount = registrationWindow.docs.filter(doc => String((doc.data() || {}).type || '') === 'new_registration').length;
 
@@ -1929,7 +2038,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
             `🔧 Compatibility issues: ${issueText}`,
             'Note: Data is a mix of Hourly and 30-Min reports.'
         ].join('\n');
-        
+
         try {
             const sent = await sendTelegramMessage(message);
             if (!sent.sent) throw new Error(sent.reason || 'Telegram is not configured.');
@@ -2022,6 +2131,14 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
 // ============================================================
 app.post('/api/telegram/webhook', async (req, res) => {
     try {
+        // FIX 4a: verify Telegram's secret_token header so random clients can't
+        // forge callback queries and add arbitrary packages to remote config.
+        const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '');
+        const suppliedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '');
+        if (!webhookSecret || !safeEqualHex(sha512(webhookSecret), sha512(suppliedSecret))) {
+            return res.status(403).json({ ok: false });
+        }
+
         const update = req.body;
         const expectedChatId = String(process.env.TELEGRAM_CHAT_ID || '').trim();
 
@@ -2038,6 +2155,11 @@ app.post('/api/telegram/webhook', async (req, res) => {
                 const platformName = parts[1];
                 const packageName = parts[2];
 
+                // FIX 4b: only allow approve actions for known platforms with valid package IDs.
+                if (!PLAY_STORE_PLATFORMS.includes(platformName) || !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
+                    return res.status(200).send('OK');
+                }
+
                 const saved = await addVerifiedPackageToRemoteConfig(platformName, packageName, {
                     source: 'telegram_admin_manual_approval',
                     approvedAt: new Date().toISOString()
@@ -2052,7 +2174,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
                         text: `✅ APPROVED!\nPackage: ${packageName}\nPlatform: ${platformName}\nConfig Version: ${saved.version}\nAdded to remote config successfully.`,
                     })
                 });
-                
+
                 await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ callback_query_id: callbackQuery.id, text: "Package Approved!" })
@@ -2077,7 +2199,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
         return res.status(200).send('OK');
     } catch (error) {
         console.error('TELEGRAM WEBHOOK ERROR:', error);
-        return res.status(200).send('OK'); 
+        return res.status(200).send('OK');
     }
 });
 
