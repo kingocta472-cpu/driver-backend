@@ -136,7 +136,7 @@ async function handleDriverTrackerAdmin(req, res) {
 // ============================================================
 // CONFIG ✅ TIME BASED SYSTEM
 // ============================================================
-const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000; // 24 Hours — new users only
+const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000;
 const REFERRAL_BONUS_MS = 3 * 60 * 60 * 1000;
 
 const DAILY_PLAN_AMOUNT = 15;
@@ -171,20 +171,20 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ UPDATE VERSION HERE - v1.18.0
-const APP_LATEST_VERSION = '1.18.0';
+// ✅ UPDATE VERSION HERE - v1.18.0 (Update to 1.19.3 when you release the APK)
+const APP_LATEST_VERSION = '1.19.3';
 const APP_MINIMUM_VERSION = '1.18.0';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk';
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.19.3/app-release.apk';
 const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.18.0) install karein.';
-const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans';
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.3) install karein.';
+const APP_RELEASE_NOTES = 'v1.19.3: Bug fixes, performance improvements, Smart Auto-Accept Fix, Click Logic Fix';
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
 const REFERRAL_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 const TRIAL_IP_LIMIT = 3;
-const TRIAL_IP_WINDOW_SECONDS = 86400; // 24 hours
+const TRIAL_IP_WINDOW_SECONDS = 86400;
 
 const FAKE_PHONE_PATTERNS = [ /^(\d)\1{9}$/, /^9999\d{6}$/, /^1234\d{6}$/, /^(\d{2})\1{4}$/, /^9876\d{6}$/, /^0000\d{6}$/ ];
 function isFakePhone(phone) { return FAKE_PHONE_PATTERNS.some(p => p.test(phone)); }
@@ -424,7 +424,6 @@ function mergeConfigObjects(base, override) {
 
 // ============================================================
 // FIX 1: validateRemoteRideConfig — required by /api/admin/config/ride-bot
-// (was undefined earlier → admin config save always failed)
 // ============================================================
 const PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 
@@ -519,12 +518,24 @@ function validateRemoteRideConfig(input) {
 
 // ✅ STRATEGY UPDATED: Normal 8, Medium 12
 const RIDE_BOT_CONFIG_DATA_KEY = 'ride-bot-config-data';
-const BLOCKED_DRIVER_PACKAGE_IDS = new Set(['in.juspay.nammayatri']);
+// 🛑 BLOCKED PACKAGES (Passenger & Wallet apps)
+const BLOCKED_DRIVER_PACKAGE_IDS = new Set([
+    'in.juspay.nammayatri',
+    // Uber
+    'com.ubercab', 'com.ubercab.eats', 'com.postmates.android', 'com.uber.restaurants', 'com.uber.restaurantmanager',
+    // Ola
+    'com.olacabs.customer', 'com.olacabs.olamoney',
+    // Rapido
+    'com.rapido.rider',
+    // Namma Yatri
+    'in.mobility.keralasavaariconsumer', 'com.mobility.movingtech', 'net.openkochi.yatri'
+]);
+
 const DEFAULT_RIDE_BOT_CONFIG = {
     platforms: {
         Uber: { package_names: ["com.ubercab.driver"], accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "match", "confirm"] },
         Ola: { package_names: ["com.olacabs.driver", "com.olacabs.oladriver"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "otp submit", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
-        Rapido: { package_names: ["com.rapido.driver", "com.rapido.rider"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
+        Rapido: { package_names: ["com.rapido.driver"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
         "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
     global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 60000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 60000 },
@@ -1326,7 +1337,9 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         const androidVersion = String(req.body.androidVersion || '').trim().slice(0, 30) || 'unknown';
         const androidSdk = Number(req.body.androidSdk || 0);
         const configVersion = Number(req.body.configVersion || 0);
-        const reason = String(req.body.reason || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 500) || 'No detailed reason supplied.';
+        
+        // ✅ Increase reason limit to 1000 to accommodate SCREEN TEXT
+        const reason = String(req.body.reason || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 1000) || 'No detailed reason supplied.';
         const recommendedAction = String(req.body.recommendedAction || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 500) || 'Review the app compatibility and update remote config or APK as required.';
         const suppliedErrorId = String(req.body.errorId || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
         const errorId = suppliedErrorId || `DRP-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
@@ -1347,8 +1360,18 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             .update(`${packageName}|${issueType}|${deviceKey}|${windowBucket}`)
             .digest('hex');
         const reportRef = getDB().collection('compatibilityReports').doc(dedupeId);
+        
+        // 🚨 INSTANT ALERT LOGIC (Anti-Spam 2 min)
+        const throttleKey = `compat-alert:${issueType}:${packageName}:${deviceKey}`;
+        const isThrottled = await redis.get(throttleKey);
         let shouldSendTelegram = false;
 
+        if (!isThrottled) {
+            shouldSendTelegram = true;
+            await redis.set(throttleKey, '1', { ex: 120 }); // 2 minute ka cooldown
+        }
+
+        // Database mein save karo (hamesha 30 min ka bucket rahega)
         await getDB().runTransaction(async transaction => {
             const snapshot = await transaction.get(reportRef);
             if (!snapshot.exists) {
@@ -1366,30 +1389,26 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
                     recommendedAction,
                     driverKey: hashPhoneForAuth(getAuthenticatedPhone(req)),
                     reportedCount: 1,
-                    telegramStatus: 'queued_for_digest',
-                    telegramLeaseUntilMs: 0,
+                    telegramStatus: shouldSendTelegram ? 'sending' : 'queued_for_digest',
+                    telegramLeaseUntilMs: shouldSendTelegram ? now + 90000 : 0,
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                     lastReportedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-                shouldSendTelegram = false;
                 return;
             }
 
             const data = snapshot.data() || {};
-            const previousStatus = String(data.telegramStatus || 'pending');
-            const leaseUntil = Number(data.telegramLeaseUntilMs || 0);
-            const retryAllowed = previousStatus !== 'sent' && leaseUntil <= now;
             transaction.update(reportRef, {
                 reportedCount: Number(data.reportedCount || 0) + 1,
                 lastReportedAt: admin.firestore.FieldValue.serverTimestamp(),
-                ...(retryAllowed ? { telegramStatus: 'sending', telegramLeaseUntilMs: now + 90000 } : {})
+                ...(shouldSendTelegram ? { telegramStatus: 'sending', telegramLeaseUntilMs: now + 90000 } : {})
             });
-            shouldSendTelegram = false;
         });
 
+        // Agar throttle nahi hai, to instant Telegram bhejo
         if (shouldSendTelegram) {
             const message = [
-                '🚨 DRIVER RIDE PICKER — COMPATIBILITY ALERT',
+                '🚨 DRIVER RIDE PICKER — INSTANT COMPATIBILITY ALERT',
                 `Issue ID: ${errorId}`,
                 `Issue: ${issueType}`,
                 `Platform: ${platform}`,
@@ -1615,7 +1634,10 @@ async function fetchGooglePlayHtml(url) {
     return html;
 }
 async function verifyPlayStoreCandidate(platformName, candidate, setting) {
-    if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(candidate?.packageName || '').trim())) return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: 'known_passenger_app_package' };
+    // 🛑 Yahan Blocklist Check ho raha hai. Passenger apps yahin reject ho jayenge.
+    if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(candidate?.packageName || '').trim())) {
+        return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: 'known_passenger_app_package' };
+    }
     const packageName = String(candidate.packageName || '').trim();
     if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
         return { packageName, verified: false, reason: 'invalid_package_id' };
@@ -1740,16 +1762,18 @@ async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence)
         return { sent: false, suppressed: true };
     }
 
-    // Find the most likely driver package to offer for approval
+    // Filter out blocked packages so they don't even show up in the approval message
+    const filteredEvidence = evidence.filter(item => !BLOCKED_DRIVER_PACKAGE_IDS.has(String(item.packageName || '').trim()));
+
     let candidatePackage = "unknown";
-    for (let item of evidence) {
-        if (item.packageName && item.packageName !== 'unknown' && !item.packageName.includes('consumer')) {
+    for (let item of filteredEvidence) {
+        if (item.packageName && item.packageName !== 'unknown') {
             candidatePackage = item.packageName;
             break;
         }
     }
 
-    const candidates = evidence.slice(0, 12).map(item =>
+    const candidates = filteredEvidence.slice(0, 12).map(item =>
         `${item.packageName || 'unknown'} | ${item.title || item.reason || 'title unavailable'} | publisher=${item.publisher || 'unverified'}`
     );
     const message = [
@@ -1761,9 +1785,6 @@ async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence)
         `\n👇 Niche diye gaye button se approve karein (Agar yeh sahi app hai)`
     ].join('\n');
 
-    // FIX 5: Telegram callback_data hard limit is 64 bytes. If the combined string
-    // is too long (or the candidate is "unknown"), skip the inline keyboard so the
-    // alert message itself still gets delivered.
     const approveData = `approve_pkg|${platformName}|${candidatePackage}`;
     const canApprove = candidatePackage !== 'unknown' && Buffer.byteLength(approveData, 'utf8') <= 64;
     const replyMarkup = canApprove ? {
@@ -1821,6 +1842,7 @@ async function runPlayStorePackageDiscovery() {
             }
             const checks = await runWithConcurrency(newCandidates, 4, candidate => verifyPlayStoreCandidate(platformName, candidate, setting));
             const verified = checks.filter(item => item.verified);
+            
             if (verified.length === 1) {
                 const candidate = verified[0];
                 const saved = await addVerifiedPackageToRemoteConfig(platformName, candidate.packageName, {
@@ -1847,7 +1869,7 @@ async function runPlayStorePackageDiscovery() {
                 const telegram = await sendPlayStoreReviewAlert(platformName, setting, 'More than one new listing passed title and publisher checks; automatic selection is unsafe.', verified);
                 results.push({ platform: platformName, status: 'manual_review_required_multiple_verified', verifiedCount: verified.length, telegramSent: !!telegram.sent });
             } else {
-                const possible = checks.filter(item => item.publisherMatch || (item.titleMatch && titleLooksLikePlatformDriverApp(item.title, setting.brandTokens)));
+                const possible = checks.filter(item => !BLOCKED_DRIVER_PACKAGE_IDS.has(item.packageName) && (item.publisherMatch || (item.titleMatch && titleLooksLikePlatformDriverApp(item.title, setting.brandTokens))));
                 if (possible.length > 0 || sourceErrors.length > 0) {
                     const reason = possible.length > 0
                         ? 'A possible replacement listing was found, but it did not pass both title and publisher checks.'
@@ -1867,6 +1889,7 @@ async function runPlayStorePackageDiscovery() {
     }
     return { success: true, checkedAt: new Date().toISOString(), results };
 }
+
 app.get('/api/cron/play-store-package-discovery', async (req, res) => {
     const expected = String(process.env.CRON_SECRET || '');
     const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -2008,8 +2031,28 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const endTs = admin.firestore.Timestamp.fromMillis(bucketStartMs + 1800000);
         const issues = await db.collection('compatibilityReports').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
         const issueCounts = {};
-        issues.forEach(doc => { const d = doc.data() || {}; const k = String(d.issueType || 'OTHER'); issueCounts[k] = (issueCounts[k] || 0) + Math.max(1, Number(d.reportedCount || 1)); });
+        const uiMismatchDetails = [];
+        
+        issues.forEach(doc => {
+            const d = doc.data() || {};
+            const k = String(d.issueType || 'OTHER');
+            issueCounts[k] = (issueCounts[k] || 0) + Math.max(1, Number(d.reportedCount || 1));
+            
+            if (k === 'UI_MISMATCH' && d.reason) {
+                // Extract just the SCREEN TEXT part if available
+                let reasonText = d.reason;
+                const screenTextIdx = reasonText.indexOf('SCREEN TEXT:');
+                if (screenTextIdx !== -1) {
+                    reasonText = reasonText.substring(screenTextIdx, screenTextIdx + 150);
+                } else {
+                    reasonText = reasonText.substring(0, 150);
+                }
+                uiMismatchDetails.push(`- ${d.platform}: ${reasonText}...`);
+            }
+        });
+        
         const issueText = Object.entries(issueCounts).map(([k,v]) => `${k}: ${v}`).join(', ') || 'None';
+        const issueDetailsText = uiMismatchDetails.length > 0 ? `\n\n🔍 UI Mismatch Details (Fix via Backend Config):\n${uiMismatchDetails.slice(0, 3).join('\n')}` : '';
 
         const registrationWindow = await db.collection('telegramEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
         const newRegistrationCount = registrationWindow.docs.filter(doc => String((doc.data() || {}).type || '') === 'new_registration').length;
@@ -2035,7 +2078,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
             '⚠️ FAILURE REASONS (Why rides missed):',
             reasonsText,
             '',
-            `🔧 Compatibility issues: ${issueText}`,
+            `🔧 Compatibility issues: ${issueText}${issueDetailsText}`,
             'Note: Data is a mix of Hourly and 30-Min reports.'
         ].join('\n');
 
@@ -2131,8 +2174,6 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
 // ============================================================
 app.post('/api/telegram/webhook', async (req, res) => {
     try {
-        // FIX 4a: verify Telegram's secret_token header so random clients can't
-        // forge callback queries and add arbitrary packages to remote config.
         const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '');
         const suppliedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '');
         if (!webhookSecret || !safeEqualHex(sha512(webhookSecret), sha512(suppliedSecret))) {
@@ -2155,8 +2196,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
                 const platformName = parts[1];
                 const packageName = parts[2];
 
-                // FIX 4b: only allow approve actions for known platforms with valid package IDs.
-                if (!PLAY_STORE_PLATFORMS.includes(platformName) || !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
+                if (!PLAY_STORE_PLATFORMS.includes(platformName) || !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName) || BLOCKED_DRIVER_PACKAGE_IDS.has(packageName)) {
                     return res.status(200).send('OK');
                 }
 
