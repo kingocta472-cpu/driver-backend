@@ -538,12 +538,13 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         Rapido: { package_names: ["com.rapido.driver"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
         "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
-    global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 60000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 60000 },
+    // ✅ FIXED: config_refresh_interval_ms 60000 → 900000 (15 minutes). Har 60s pe cache clear hona band.
+    global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 900000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 900000 },
     strategies: {
         normal: { attempts: 8, tapIntervalMs: 45, verifyDelayMs: 60, tapMode: 'CENTER' },
         medium: { attempts: 12, tapIntervalMs: 45, verifyDelayMs: 60, tapMode: 'CENTER' },
-        // FIX 3: high_speed verifyDelayMs raised from 10 → 60 (old APKs need the extra time to react).
-        high_speed: { attempts: 10, tapIntervalMs: 15, verifyDelayMs: 60, tapMode: 'GHOST' }
+        // ✅ FIXED: high_speed verifyDelayMs 60 → 15. Slow-mode fallbacks (attemptsSlow, verifyDelaySlowMs) bhi add.
+        high_speed: { attempts: 10, attemptsSlow: 12, tapIntervalMs: 15, verifyDelayMs: 15, verifyDelaySlowMs: 25, tapMode: 'GHOST' }
     }
 };
 
