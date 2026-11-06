@@ -173,8 +173,7 @@ const PIN_LOCK_MINUTES = 15;
 
 // ✅ UPDATED: New version and link applied
 const APP_LATEST_VERSION = '1.19.5';
-// ✅ FIX: Minimum version 1.0.0 kar diya taaki koi force update na ho
-const APP_MINIMUM_VERSION = '1.0.0'; 
+const APP_MINIMUM_VERSION = '1.19.5';
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.5/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.5) install karein.';
@@ -660,12 +659,9 @@ app.get('/api/app/update', (req, res) => {
         res.set('Pragma', 'no-cache'); res.set('Expires', '0');
         const currentVersion = String(req.query.currentVersion || '').trim();
         const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
-        
+        const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
         const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
-        
-        // ✅ FIX: Force update ko hamesha false kar diya hai
-        const forceUpdate = false;
-
+        const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
         return res.json({
             success: true, latestVersion: APP_LATEST_VERSION, minimumVersion: APP_MINIMUM_VERSION,
             forceUpdate, updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
@@ -881,6 +877,8 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 if (clientIp && clientIp !== 'unknown' && clientIp !== '::1' && clientIp !== '127.0.0.1') {
                     const ipKey = `trial:ip:${clientIp}`; const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
                     if (currentCount >= TRIAL_IP_LIMIT) return res.status(429).json({ success: false, message: 'Is network se bahut zyada naye account bane hain. Kripya kal try karein.' });
+                    // ✅ FIX: expire ab incr ke result par lagta hai, taaki key kabhi bina expiry ke na rahe
+                    // (pehle expire sirf stale 'currentCount === 0' par lagta tha).
                     const newCount = await redis.incr(ipKey);
                     if (newCount === 1) await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
                 }
