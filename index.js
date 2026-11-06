@@ -171,13 +171,13 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ FIXED: Reverted back to v1.18.0 as requested
-const APP_LATEST_VERSION = '1.18.0';
-const APP_MINIMUM_VERSION = '1.18.0';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-ride-picker-website/releases/download/v1.18.0/app-release.apk'; 
+// ✅ UPDATED: New version and link applied
+const APP_LATEST_VERSION = '1.19.5';
+const APP_MINIMUM_VERSION = '1.19.5';
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.5/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.18.0) install karein.';
-const APP_RELEASE_NOTES = 'v1.18.0: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.5) install karein.';
+const APP_RELEASE_NOTES = 'v1.19.5: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
