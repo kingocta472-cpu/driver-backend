@@ -474,7 +474,11 @@ function validateRemoteRideConfig(input) {
         out.global = {};
         for (const [key, value] of Object.entries(input.global)) {
             if (!KEY_RE.test(key)) throw new Error(`Invalid global key: ${key}`);
-            out.global[key] = num(value, 1, 86400000, `global.${key}`);
+            // ✅ FIX: bot_enabled / auto_accept_enabled jaise true/false switches ab save ho sakte hain.
+            // Pehle boolean ko number bana diya jata tha (true -> 1) ya false par error aata tha,
+            // aur Android app us 1 ko boolean nahi padhta.
+            if (typeof value === 'boolean') out.global[key] = value;
+            else out.global[key] = num(value, 1, 86400000, `global.${key}`);
         }
     }
 
@@ -873,8 +877,10 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 if (clientIp && clientIp !== 'unknown' && clientIp !== '::1' && clientIp !== '127.0.0.1') {
                     const ipKey = `trial:ip:${clientIp}`; const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
                     if (currentCount >= TRIAL_IP_LIMIT) return res.status(429).json({ success: false, message: 'Is network se bahut zyada naye account bane hain. Kripya kal try karein.' });
-                    await redis.incr(ipKey);
-                    if (currentCount === 0) await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
+                    // ✅ FIX: expire ab incr ke result par lagta hai, taaki key kabhi bina expiry ke na rahe
+                    // (pehle expire sirf stale 'currentCount === 0' par lagta tha).
+                    const newCount = await redis.incr(ipKey);
+                    if (newCount === 1) await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
                 }
             } catch (ipError) { console.error('IP RATE LIMIT ERROR:', ipError); }
 
