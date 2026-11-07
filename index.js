@@ -1975,7 +1975,8 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const nowMs = Date.now();
         const bucketStartMs = Math.floor(nowMs / 1800000) * 1800000 - 1800000;
         const halfHourKey = new Date(bucketStartMs).toISOString();
-        const hourKey = new Date(Math.floor(nowMs / 3600000) * 3600000).toISOString();
+        const startTs = admin.firestore.Timestamp.fromMillis(bucketStartMs);
+        const endTs = admin.firestore.Timestamp.fromMillis(bucketStartMs + 1800000);
 
         const runRef = db.collection('halfHourlySummaryRuns').doc(String(bucketStartMs));
         let claimed = false;
@@ -1988,8 +1989,15 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         });
         if (!claimed) return res.json({ success: true, skipped: true, halfHourKey });
 
-        const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('halfHourKey', '==', halfHourKey).get();
-        const telemetryHourly = await db.collection('driverHourlyTelemetry').where('hourKey', '==', hourKey).get();
+        // ✅ FIX (Ride Performance 0 aa raha tha):
+        // Pehle half-hour report sirf 'halfHourKey' (app ke periodStart bucket) aur
+        // 'hourKey' (cron chalne wale CURRENT ghante) se match karti thi. Isse:
+        //   1) Report jo pichhle ghante/bucket me aayi wo kabhi match nahi hoti thi,
+        //   2) Late aayi report (periodStart purana) already-sent window me chali jati thi.
+        // Ab dono collections me 'receivedAt' (jab server ko report mili) se is 30-min window ka
+        // data uthaya jata hai, jisse koi report miss nahi hoti aur double count bhi nahi hota.
+        const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
+        const telemetryHourly = await db.collection('driverHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
 
         let success = 0, failed = 0;
         let reasonsMap = {};
@@ -2028,8 +2036,6 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const online = Math.min(totalDrivers, Math.max(0, Number(onlineSnap.data().count || 0)));
         const offline = Math.max(0, totalDrivers - online);
 
-        const startTs = admin.firestore.Timestamp.fromMillis(bucketStartMs);
-        const endTs = admin.firestore.Timestamp.fromMillis(bucketStartMs + 1800000);
         const issues = await db.collection('compatibilityReports').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
         const issueCounts = {};
         const uiMismatchDetails = [];
