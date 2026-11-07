@@ -449,7 +449,7 @@ function validateRemoteRideConfig(input) {
         if (typeof input.platforms !== 'object' || Array.isArray(input.platforms) || !input.platforms) throw new Error('platforms must be an object.');
         out.platforms = {};
         for (const [name, cfg] of Object.entries(input.platforms)) {
-            if (!['Uber', 'Ola', 'Rapido', 'Namma Yatri'].includes(name)) throw new Error(`Unknown platform: ${name}`);
+            if (!['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'].includes(name)) throw new Error(`Unknown platform: ${name}`);
             if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`platforms.${name} must be an object.`);
             const p = {};
             for (const [key, value] of Object.entries(cfg)) {
@@ -540,7 +540,8 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         Uber: { package_names: ["com.ubercab.driver"], accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "match", "confirm"] },
         Ola: { package_names: ["com.olacabs.driver", "com.olacabs.oladriver"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "otp submit", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         Rapido: { package_names: ["com.rapido.driver"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
-        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
+        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
+        CityRide: { package_names: ["in.cityride.driver"], accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
     // ✅ FIXED: config_refresh_interval_ms 60000 → 900000 (15 minutes). Har 60s pe cache clear hona band.
     global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 900000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 900000 },
@@ -708,9 +709,9 @@ app.post('/api/admin/platform/package/add', async (req, res) => {
     try {
         const platformName = String(req.body?.platform || '').trim();
         const packageName = String(req.body?.packageName || '').trim();
-        const allowedPlatforms = ['Uber', 'Ola', 'Rapido', 'Namma Yatri'];
+        const allowedPlatforms = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'];
         const packagePattern = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
-        if (!allowedPlatforms.includes(platformName)) return res.status(400).json({ success: false, message: 'Invalid platform. Use Uber, Ola, Rapido, or Namma Yatri.' });
+        if (!allowedPlatforms.includes(platformName)) return res.status(400).json({ success: false, message: 'Invalid platform. Use Uber, Ola, Rapido, Namma Yatri, or CityRide.' });
         if (!packagePattern.test(packageName) || packageName.length > 180) return res.status(400).json({ success: false, message: 'Invalid Android package name.' });
         if (BLOCKED_DRIVER_PACKAGE_IDS.has(packageName)) return res.status(400).json({ success: false, message: 'Passenger application package cannot be approved as a driver app.' });
 
@@ -1308,7 +1309,7 @@ app.post('/api/telemetry/alert', verifyFirebaseToken, async (req, res) => {
     try {
         const platform = String(req.body.platform || '').trim();
         const type = String(req.body.type || req.body.eventType || '').trim().toUpperCase();
-        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'UNKNOWN'];
+        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'UNKNOWN'];
         const allowedTypes = ['SUCCESS', 'FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'NO_RIDE_DETECTED_5MIN', 'CREDIT_FAILED', 'BOT_FAILURE', 'CUSTOM_ALERT'];
         if (!allowedPlatforms.includes(platform.toUpperCase()) || !allowedTypes.includes(type)) return res.status(400).json({ success: false, message: 'Unsupported telemetry alert.' });
         const phone = getAuthenticatedPhone(req);
@@ -1332,7 +1333,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             return res.status(400).json({ success: false, message: 'Unsupported compatibility issue type.' });
         }
 
-        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'UNKNOWN'];
+        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'UNKNOWN'];
         const platform = String(req.body.platform || 'UNKNOWN').trim().toUpperCase().slice(0, 40);
         if (!allowedPlatforms.includes(platform)) {
             return res.status(400).json({ success: false, message: 'Unsupported platform.' });
@@ -1427,7 +1428,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
                         : `Not auto-approved: ${unknownPackageAutoApproval?.status || 'manual_review_required'}. No unverified package was added.`,
                     ...(unknownPackageAutoApproval?.status === 'auto_approved' || unknownPackageAutoApproval?.status === 'already_present' ? [] : [
                         'After manual verification, call POST /api/admin/platform/package/add',
-                        `JSON body: {\"platform\":\"<Uber|Ola|Rapido|Namma Yatri>\",\"packageName\":\"${packageName}\"}`,
+                        `JSON body: {\"platform\":\"<Uber|Ola|Rapido|Namma Yatri|CityRide>\",\"packageName\":\"${packageName}\"}`,
                         'Authorization: Bearer <ADMIN_TOKEN> (keep token private).'
                     ])
                 ] : []),
@@ -1462,7 +1463,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
 // ============================================================
 // GOOGLE PLAY PACKAGE DISCOVERY + VERIFIED AUTO-APPROVAL
 // ============================================================
-const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri'];
+const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'];
 const PLAY_STORE_MONITOR_DEFAULTS = {
     Uber: {
         developerUrl: 'https://play.google.com/store/apps/dev?id=7908612043055486674',
@@ -1491,6 +1492,13 @@ const PLAY_STORE_MONITOR_DEFAULTS = {
         publisherAliases: ['Moving Tech', 'MOVING TECH INNOVATIONS PRIVATE LIMITED'],
         titleGroups: [['yatri', 'driver'], ['namma', 'yatri', 'driver'], ['yatri', 'partner'], ['namma', 'yatri', 'partner'], ['mana', 'yatri', 'partner']],
         brandTokens: ['yatri', 'namma', 'mana']
+    },
+    CityRide: {
+        developerUrl: 'https://play.google.com/store/apps/dev?id=5703122196089736760',
+        searchUrl: 'https://play.google.com/store/search?q=CityRide%20Pilot&c=apps',
+        publisherAliases: ['INEVITABLEX STUDIOS', 'INEVITABLEX STUDIOS PRIVATE LIMITED'],
+        titleGroups: [['cityride', 'pilot'], ['city', 'ride', 'pilot']],
+        brandTokens: ['cityride', 'city ride']
     }
 };
 
@@ -1612,7 +1620,7 @@ function titleMatchesPlatform(title, titleGroups) {
 function titleLooksLikePlatformDriverApp(title, brandTokens) {
     const normalized = normalizePublisherText(title);
     const brandPresent = brandTokens.some(token => normalized.includes(token));
-    const rolePresent = ['driver', 'captain', 'partner', 'fleet'].some(token => normalized.includes(token));
+    const rolePresent = ['driver', 'captain', 'partner', 'fleet', 'pilot'].some(token => normalized.includes(token));
     return brandPresent && rolePresent;
 }
 async function fetchGooglePlayHtml(url) {
