@@ -547,17 +547,23 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         Uber: { package_names: ["com.ubercab.driver"], accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "match", "confirm"] },
         Ola: { package_names: ["com.olacabs.driver", "com.olacabs.oladriver"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "otp submit", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         Rapido: { package_names: ["com.rapido.driver"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
-        // SPEED: "Accept" first (screen button says "Accept")
         "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         CityRide: { package_names: ["in.cityride.driver"], accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
     // SPEED: refresh every 5 minutes
     global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 300000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 300000 },
-    // SPEED: faster strategies
+    // 🚀 SPEED: Tuned strategies for higher success rate without getting banned
     strategies: {
-        normal: { attempts: 10, tapIntervalMs: 20, verifyDelayMs: 25, tapMode: 'CENTER' },
-        medium: { attempts: 15, tapIntervalMs: 12, verifyDelayMs: 15, tapMode: 'GHOST' },
-        high_speed: { attempts: 25, attemptsSlow: 25, tapIntervalMs: 3, verifyDelayMs: 5, verifyDelaySlowMs: 10, tapMode: 'GHOST' }
+        normal: { attempts: 15, tapIntervalMs: 10, verifyDelayMs: 15, tapMode: 'CENTER' },
+        medium: { attempts: 20, tapIntervalMs: 5, verifyDelayMs: 10, tapMode: 'GHOST' },
+        high_speed: { attempts: 30, attemptsSlow: 30, tapIntervalMs: 1, verifyDelayMs: 2, verifyDelaySlowMs: 5, tapMode: 'GHOST' }
+    },
+    // 🛑 NEW: UI Mismatch Fix (Ignore side menu texts)
+    filters: {
+        ignore_text: [
+            "Close drawer", "Earnings", "Trips", "Preferences", "Plans", "Benefits", "Store", "Help", "About", "Google Maps",
+            "My Profile", "Access Fee", "Miles Bonus", "Rewards", "Service Manager", "Activation Status", "Refer friends", "Get New Vehicle Numbers", "Tap to Earn"
+        ]
     }
 };
 
