@@ -1,5 +1,5 @@
 /*
- * Driver Ride Picker backend.
+ * Driver Ride Picker backend. (FINAL SPEED-OPTIMIZED VERSION)
  */
 
 const express = require('express');
@@ -22,6 +22,18 @@ app.use(cors({
 }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(express.json({ limit: '1mb' }));
+
+// ============================================================
+// SPEED CACHES (new)
+// ============================================================
+// Ride-bot config response cache (10 sec) - cleared on every admin change.
+let rideConfigCache = { at: 0, body: null };
+const RIDE_CONFIG_CACHE_MS = 10000;
+function clearRideConfigCache() { rideConfigCache = { at: 0, body: null }; }
+
+// uid -> user doc cache (60 sec) - avoids a Firestore query on every request.
+const userByUidCache = new Map();
+const USER_CACHE_MS = 60000;
 
 // ============================================================
 // DRIVER ACTIVITY TRACKER - INLINE
@@ -171,7 +183,6 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ UPDATED: New version and link applied
 const APP_LATEST_VERSION = '1.19.5';
 const APP_MINIMUM_VERSION = '1.19.5';
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.5/app-release.apk'; 
@@ -389,7 +400,7 @@ async function notifyNewRegistrationIfNeeded(phone, isNewUser) {
 }
 
 // ============================================================
-// FIX 2: mergeStrategies helper (defined before mergeConfigObjects)
+// CONFIG MERGE
 // ============================================================
 function mergeStrategies(baseStrategies, overrideStrategies) {
     const result = {};
@@ -417,13 +428,12 @@ function mergeConfigObjects(base, override) {
     }
     merged.global = { ...base.global, ...(override.global || {}) };
     merged.filters = { ...(base.filters || {}), ...(override.filters || {}) };
-    // FIX 2: properly merge strategies (including `normal`) instead of ignoring override.normal.
     merged.strategies = mergeStrategies(base.strategies, override.strategies);
     return merged;
 }
 
 // ============================================================
-// FIX 1: validateRemoteRideConfig — required by /api/admin/config/ride-bot
+// VALIDATOR
 // ============================================================
 const PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 
@@ -474,9 +484,6 @@ function validateRemoteRideConfig(input) {
         out.global = {};
         for (const [key, value] of Object.entries(input.global)) {
             if (!KEY_RE.test(key)) throw new Error(`Invalid global key: ${key}`);
-            // ✅ FIX: bot_enabled / auto_accept_enabled jaise true/false switches ab save ho sakte hain.
-            // Pehle boolean ko number bana diya jata tha (true -> 1) ya false par error aata tha,
-            // aur Android app us 1 ko boolean nahi padhta.
             if (typeof value === 'boolean') out.global[key] = value;
             else out.global[key] = num(value, 1, 86400000, `global.${key}`);
         }
@@ -506,8 +513,9 @@ function validateRemoteRideConfig(input) {
             if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`strategies.${name} must be an object.`);
             const s = {};
             for (const [key, value] of Object.entries(cfg)) {
-                if (['attempts', 'attemptsSlow', 'attempts_slow'].includes(key)) s[key] = Math.round(num(value, 1, 20, `${name}.${key}`));
-                else if (['tapIntervalMs', 'tap_interval_ms', 'verifyDelayMs', 'verify_delay_ms', 'verifyDelaySlowMs', 'verify_delay_slow_ms'].includes(key)) s[key] = Math.round(num(value, 5, 1000, `${name}.${key}`));
+                // SPEED: limits opened (attempts 1-30, delays 1-1000 ms)
+                if (['attempts', 'attemptsSlow', 'attempts_slow'].includes(key)) s[key] = Math.round(num(value, 1, 30, `${name}.${key}`));
+                else if (['tapIntervalMs', 'tap_interval_ms', 'verifyDelayMs', 'verify_delay_ms', 'verifyDelaySlowMs', 'verify_delay_slow_ms'].includes(key)) s[key] = Math.round(num(value, 1, 1000, `${name}.${key}`));
                 else if (key === 'tapMode') {
                     const mode = String(value).toUpperCase();
                     if (!['CENTER', 'GHOST'].includes(mode)) throw new Error('tapMode must be CENTER or GHOST.');
@@ -520,7 +528,6 @@ function validateRemoteRideConfig(input) {
     return out;
 }
 
-// ✅ STRATEGY UPDATED: Normal 8, Medium 12
 const RIDE_BOT_CONFIG_DATA_KEY = 'ride-bot-config-data';
 // 🛑 BLOCKED PACKAGES (Passenger & Wallet apps)
 const BLOCKED_DRIVER_PACKAGE_IDS = new Set([
@@ -540,16 +547,17 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         Uber: { package_names: ["com.ubercab.driver"], accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "match", "confirm"] },
         Ola: { package_names: ["com.olacabs.driver", "com.olacabs.oladriver"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "otp submit", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         Rapido: { package_names: ["com.rapido.driver"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
-        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Confirm", "Accept", "Accept Ride"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
+        // SPEED: "Accept" first (screen button says "Accept")
+        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         CityRide: { package_names: ["in.cityride.driver"], accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
-    // ✅ FIXED: config_refresh_interval_ms 60000 → 900000 (15 minutes). Har 60s pe cache clear hona band.
-    global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 900000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 900000 },
+    // SPEED: refresh every 5 minutes
+    global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 300000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 300000 },
+    // SPEED: faster strategies
     strategies: {
-        normal: { attempts: 8, tapIntervalMs: 45, verifyDelayMs: 60, tapMode: 'CENTER' },
-        medium: { attempts: 12, tapIntervalMs: 45, verifyDelayMs: 60, tapMode: 'CENTER' },
-        // ✅ FIXED: high_speed verifyDelayMs 60 → 15. Slow-mode fallbacks (attemptsSlow, verifyDelaySlowMs) bhi add.
-        high_speed: { attempts: 10, attemptsSlow: 12, tapIntervalMs: 15, verifyDelayMs: 15, verifyDelaySlowMs: 25, tapMode: 'GHOST' }
+        normal: { attempts: 10, tapIntervalMs: 20, verifyDelayMs: 25, tapMode: 'CENTER' },
+        medium: { attempts: 15, tapIntervalMs: 12, verifyDelayMs: 15, tapMode: 'GHOST' },
+        high_speed: { attempts: 25, attemptsSlow: 25, tapIntervalMs: 3, verifyDelayMs: 5, verifyDelaySlowMs: 10, tapMode: 'GHOST' }
     }
 };
 
@@ -583,11 +591,20 @@ async function verifyFirebaseToken(req, res, next) {
     try {
         const decoded = await decodeFirebaseToken(req);
         if (!decoded.uid) return res.status(401).json({ success: false, message: 'Invalid Firebase user.' });
-        const db = getDB();
-        const snapshot = await db.collection('users').where('firebaseUid', '==', decoded.uid).limit(1).get();
-        if (snapshot.empty) return res.status(401).json({ success: false, message: 'Driver account authentication required.' });
-        const userDoc = snapshot.docs[0];
-        const userData = userDoc.data() || {};
+
+        // SPEED: cached user lookup (60 sec) instead of a Firestore query every request
+        let cachedUser = userByUidCache.get(decoded.uid);
+        if (!cachedUser || Date.now() - cachedUser.at > USER_CACHE_MS) {
+            const db = getDB();
+            const snapshot = await db.collection('users').where('firebaseUid', '==', decoded.uid).limit(1).get();
+            if (snapshot.empty) return res.status(401).json({ success: false, message: 'Driver account authentication required.' });
+            const doc = snapshot.docs[0];
+            cachedUser = { at: Date.now(), id: doc.id, data: doc.data() || {} };
+            userByUidCache.set(decoded.uid, cachedUser);
+            if (userByUidCache.size > 5000) userByUidCache.clear();
+        }
+        const userDoc = { id: cachedUser.id };
+        const userData = cachedUser.data;
         req.firebaseUser = { uid: decoded.uid, phone: normalizePhone(userData.phone || userDoc.id), decodedToken: decoded, userData };
         req.driverUser = userData;
 
@@ -672,20 +689,28 @@ app.get('/api/app/update', (req, res) => {
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to check app update status.' }); }
 });
 
+// SPEED: cached + parallel Redis reads
 app.get('/api/config/ride-bot', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Access-Control-Allow-Origin', '*');
     try {
-        const version = await getRideBotConfigVersion();
-        let config = { ...DEFAULT_RIDE_BOT_CONFIG };
-        try {
-            const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
-            if (stored) {
+        if (rideConfigCache.body && Date.now() - rideConfigCache.at < RIDE_CONFIG_CACHE_MS) {
+            return res.status(200).json(rideConfigCache.body);
+        }
+        const [version, stored] = await Promise.all([
+            getRideBotConfigVersion(),
+            redis.get(RIDE_BOT_CONFIG_DATA_KEY).catch(() => null)
+        ]);
+        let config = DEFAULT_RIDE_BOT_CONFIG;
+        if (stored) {
+            try {
                 const parsed = typeof stored === 'string' ? JSON.parse(stored) : stored;
                 config = mergeConfigObjects(config, parsed);
-            }
-        } catch (configError) { console.error('REMOTE RIDE CONFIG READ ERROR:', configError.message || configError); }
-        return res.status(200).json({ version, updatedAt: new Date().toISOString(), ...config });
+            } catch (configError) { console.error('REMOTE RIDE CONFIG READ ERROR:', configError.message || configError); }
+        }
+        const body = { version, updatedAt: new Date().toISOString(), ...config };
+        rideConfigCache = { at: Date.now(), body };
+        return res.status(200).json(body);
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to load ride bot config.' }); }
 });
 
@@ -700,8 +725,21 @@ app.post('/api/admin/config/ride-bot', async (req, res) => {
         const previousVersion = await getRideBotConfigVersion();
         const newVersion = previousVersion + 1;
         await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(newVersion));
+        clearRideConfigCache();
         return res.json({ success: true, previousVersion, newVersion, config: merged });
     } catch (error) { return res.status(400).json({ success: false, message: error.message || 'Unable to save remote config.' }); }
+});
+
+// NEW: wipe stored (old/slow) config from Redis so code defaults become active
+app.post('/api/admin/config/reset', async (req, res) => {
+    if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
+    try {
+        await redis.del(RIDE_BOT_CONFIG_DATA_KEY);
+        const newVersion = (await getRideBotConfigVersion()) + 1;
+        await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(newVersion));
+        clearRideConfigCache();
+        return res.json({ success: true, newVersion, message: 'Stored config cleared. Code defaults are now active.' });
+    } catch (e) { return res.status(500).json({ success: false, message: 'Reset failed.' }); }
 });
 
 app.post('/api/admin/platform/package/add', async (req, res) => {
@@ -729,6 +767,7 @@ app.post('/api/admin/platform/package/add', async (req, res) => {
             const previousVersion = await getRideBotConfigVersion();
             const newVersion = previousVersion + 1;
             await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(newVersion));
+            clearRideConfigCache();
             return res.json({ success: true, added: true, platform: platformName, packageName, previousVersion, newVersion, message: 'Package added. Compatible installed APKs will receive it on their next remote-config refresh.' });
         }
         return res.json({ success: true, added: false, platform: platformName, packageName, version: await getRideBotConfigVersion(), message: 'Package already exists in remote config.' });
@@ -749,6 +788,7 @@ app.post('/api/admin/config/bump', async (req, res) => {
     try {
         const current = await getRideBotConfigVersion(); const next = current + 1;
         await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(next));
+        clearRideConfigCache();
         return res.json({ success: true, previousVersion: current, newVersion: next, message: `Config version bumped to ${next}.` });
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to bump config version.' }); }
 });
@@ -759,6 +799,7 @@ app.post('/api/admin/config/set', async (req, res) => {
         const requested = Number(req.body.version);
         if (!Number.isFinite(requested) || requested <= 0 || !Number.isInteger(requested)) return res.status(400).json({ success: false, message: 'version must be a positive integer.' });
         await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(requested));
+        clearRideConfigCache();
         return res.json({ success: true, newVersion: requested });
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to set config version.' }); }
 });
@@ -878,8 +919,6 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 if (clientIp && clientIp !== 'unknown' && clientIp !== '::1' && clientIp !== '127.0.0.1') {
                     const ipKey = `trial:ip:${clientIp}`; const currentCount = parseInt(await redis.get(ipKey) || '0', 10);
                     if (currentCount >= TRIAL_IP_LIMIT) return res.status(429).json({ success: false, message: 'Is network se bahut zyada naye account bane hain. Kripya kal try karein.' });
-                    // ✅ FIX: expire ab incr ke result par lagta hai, taaki key kabhi bina expiry ke na rahe
-                    // (pehle expire sirf stale 'currentCount === 0' par lagta tha).
                     const newCount = await redis.incr(ipKey);
                     if (newCount === 1) await redis.expire(ipKey, TRIAL_IP_WINDOW_SECONDS);
                 }
@@ -1007,6 +1046,9 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
         await notifyNewRegistrationIfNeeded(phone, isNewUser);
 
+        // fresh login -> drop any stale cached user for this uid
+        userByUidCache.delete(driverFirebaseUid);
+
         return res.json({
             success: true, isNewUser, trialPlanAdded: trialAdded, pinWasCreated, authMethod: 'pin',
             firebaseCustomToken, message: welcomeMessage,
@@ -1072,26 +1114,28 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
     }
 });
 
+// SPEED: uses cached user (no Firestore read); falls back to a fresh read only if cache says expired
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = normalizePhone(req.body.phone);
         if (!phoneMatchesAuthenticatedUser(req, phone)) return res.status(403).json({ success: false, message: 'You can only use your own account.' });
-        const db = getDB();
-        const userRef = db.collection('users').doc(phone);
-        const userSnapshot = await userRef.get();
-        if (!userSnapshot.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
-        const userData = userSnapshot.data() || {};
-        const planExpiry = Number(userData.planExpiry || 0);
-        const isUnlimited = planExpiry > Date.now();
-        const activePlanType = getActivePlanType(userData);
-
-        if (isUnlimited) {
-            const totalRides = Number(userData.totalRides || 0) + 1;
-            await userRef.update({ totalRides, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-            return res.json({ success: true, alreadyProcessed: false, ridesDeducted: 0, unlimited: true, planType: activePlanType, message: `Unlimited ${activePlanType} plan active. No deduction.` });
-        } else {
-            return res.status(402).json({ success: false, message: 'Plan expired. Please recharge to continue.' });
+        let userData = req.driverUser || {};
+        if (Number(userData.planExpiry || 0) <= Date.now()) {
+            // cache may be stale (e.g. just recharged) - confirm with a fresh read
+            const fresh = await getDB().collection('users').doc(phone).get();
+            if (!fresh.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
+            userData = fresh.data() || {};
+            userByUidCache.delete(req.firebaseUser.uid);
+            if (Number(userData.planExpiry || 0) <= Date.now()) {
+                return res.status(402).json({ success: false, message: 'Plan expired. Please recharge to continue.' });
+            }
         }
+        getDB().collection('users').doc(phone).update({
+            totalRides: admin.firestore.FieldValue.increment(1),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }).catch(e => console.error('RIDE COUNT ERROR:', e.message || e));
+        const activePlanType = getActivePlanType(userData);
+        return res.json({ success: true, alreadyProcessed: false, ridesDeducted: 0, unlimited: true, planType: activePlanType, message: `Unlimited ${activePlanType} plan active. No deduction.` });
     } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to process ride.' }); }
 });
 
@@ -1211,6 +1255,7 @@ app.post('/api/payment/payu/return', async (req, res) => {
             transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
             transaction.update(orderRef, { status: 'paid', paymentGateway: 'PAYU', paymentId: String(verified.mihpayid || body.mihpayid || ''), payuStatus: verifiedStatus, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
         });
+        userByUidCache.clear();
         return successPage();
     } catch (error) {
         console.error('PAYU RETURN/VERIFY ERROR:', error.message || error);
@@ -1252,6 +1297,7 @@ app.post('/api/payment/payu/verify', verifyFirebaseToken, async (req, res) => {
             transaction.update(userRef, { activePlan: planType, planExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
             transaction.update(orderRef, { status: 'paid', paymentGateway: 'PAYU', paymentId: String(verified.mihpayid || ''), payuStatus: verifiedStatus, activatedPlan: planType, planExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
         });
+        userByUidCache.delete(req.firebaseUser.uid);
         return res.json({ success: true, alreadyProcessed: false, provider: 'PAYU', status: 'success', planType: orderData.planType, planExpiry, planExpiryIso: planExpiry ? new Date(planExpiry).toISOString() : null, message: 'Payment verified and plan activated.' });
     } catch (error) {
         console.error('PAYU APP VERIFY ERROR:', error.message || error);
@@ -1346,7 +1392,6 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         const androidSdk = Number(req.body.androidSdk || 0);
         const configVersion = Number(req.body.configVersion || 0);
         
-        // ✅ Increase reason limit to 1000 to accommodate SCREEN TEXT
         const reason = String(req.body.reason || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 1000) || 'No detailed reason supplied.';
         const recommendedAction = String(req.body.recommendedAction || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 500) || 'Review the app compatibility and update remote config or APK as required.';
         const suppliedErrorId = String(req.body.errorId || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
@@ -1354,8 +1399,13 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
 
         let unknownPackageAutoApproval = null;
         if (issueType === 'UNKNOWN_PACKAGE' && platform === 'UNKNOWN' && packageName !== 'unknown') {
-            try { unknownPackageAutoApproval = await tryAutoApproveReportedUnknownPackage(packageName); }
-            catch (verificationError) {
+            try {
+                // SPEED: don't make the app wait more than 4 sec for Google Play checks
+                unknownPackageAutoApproval = await Promise.race([
+                    tryAutoApproveReportedUnknownPackage(packageName),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('verification timeout')), 4000))
+                ]);
+            } catch (verificationError) {
                 unknownPackageAutoApproval = { status: 'verification_failed', reason: String(verificationError.message || verificationError).slice(0, 160) };
                 console.error('UNKNOWN PACKAGE AUTO-VERIFICATION ERROR:', verificationError.message || verificationError);
             }
@@ -1369,11 +1419,9 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             .digest('hex');
         const reportRef = getDB().collection('compatibilityReports').doc(dedupeId);
         
-        // ✅ FIX: Instant Telegram alerts disabled to prevent spam. 
-        // Reports will be silently saved and included in the 30-minute digest.
+        // Instant Telegram alerts disabled (spam). Reports go into the 30-minute digest.
         let shouldSendTelegram = false;
 
-        // Database mein save karo (hamesha 30 min ka bucket rahega)
         await getDB().runTransaction(async transaction => {
             const snapshot = await transaction.get(reportRef);
             if (!snapshot.exists) {
@@ -1407,7 +1455,6 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             });
         });
 
-        // Since shouldSendTelegram is false, this block will never run
         if (shouldSendTelegram) {
             const message = [
                 '🚨 DRIVER RIDE PICKER — INSTANT COMPATIBILITY ALERT',
@@ -1643,7 +1690,6 @@ async function fetchGooglePlayHtml(url) {
     return html;
 }
 async function verifyPlayStoreCandidate(platformName, candidate, setting) {
-    // 🛑 Yahan Blocklist Check ho raha hai. Passenger apps yahin reject ho jayenge.
     if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(candidate?.packageName || '').trim())) {
         return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: 'known_passenger_app_package' };
     }
@@ -1756,6 +1802,7 @@ async function addVerifiedPackageToRemoteConfig(platformName, packageName, verif
     const previousVersion = await getRideBotConfigVersion();
     const version = previousVersion + 1;
     await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(version));
+    clearRideConfigCache();
     await redis.set(`play-package-verified:${platformName}:${packageName}`, JSON.stringify({
         ...verification, verifiedAt: new Date().toISOString(), configVersion: version
     }), { ex: 31536000 });
@@ -1771,7 +1818,6 @@ async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence)
         return { sent: false, suppressed: true };
     }
 
-    // Filter out blocked packages so they don't even show up in the approval message
     const filteredEvidence = evidence.filter(item => !BLOCKED_DRIVER_PACKAGE_IDS.has(String(item.packageName || '').trim()));
 
     let candidatePackage = "unknown";
@@ -1997,13 +2043,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         });
         if (!claimed) return res.json({ success: true, skipped: true, halfHourKey });
 
-        // ✅ FIX (Ride Performance 0 aa raha tha):
-        // Pehle half-hour report sirf 'halfHourKey' (app ke periodStart bucket) aur
-        // 'hourKey' (cron chalne wale CURRENT ghante) se match karti thi. Isse:
-        //   1) Report jo pichhle ghante/bucket me aayi wo kabhi match nahi hoti thi,
-        //   2) Late aayi report (periodStart purana) already-sent window me chali jati thi.
-        // Ab dono collections me 'receivedAt' (jab server ko report mili) se is 30-min window ka
-        // data uthaya jata hai, jisse koi report miss nahi hoti aur double count bhi nahi hota.
+        // Data is picked by 'receivedAt' (when the server got the report) so no report is missed.
         const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
         const telemetryHourly = await db.collection('driverHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
 
@@ -2054,7 +2094,6 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
             issueCounts[k] = (issueCounts[k] || 0) + Math.max(1, Number(d.reportedCount || 1));
             
             if (k === 'UI_MISMATCH' && d.reason) {
-                // Extract just the SCREEN TEXT part if available
                 let reasonText = d.reason;
                 const screenTextIdx = reasonText.indexOf('SCREEN TEXT:');
                 if (screenTextIdx !== -1) {
@@ -2179,6 +2218,7 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
             transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
             transaction.update(orderRef, { status: 'paid', paymentId, signature, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
         });
+        userByUidCache.delete(req.firebaseUser.uid);
 
         return res.json({ success: true, alreadyProcessed: false, planType, planExpiry: newPlanExpiry, planExpiryIso: new Date(newPlanExpiry).toISOString(), message: `${planType} plan activated successfully.` });
     } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' }); }
