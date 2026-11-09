@@ -562,15 +562,17 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         configRefreshIntervalMs: 300000 
     },
     strategies: {
-        normal: { attempts: 8, tapIntervalMs: 15, verifyDelayMs: 20, tapMode: 'CENTER' },
-        medium: { attempts: 15, tapIntervalMs: 12, verifyDelayMs: 20, tapMode: 'GHOST' },
-        high_speed: { attempts: 20, attemptsSlow: 20, tapIntervalMs: 10, verifyDelayMs: 20, verifyDelaySlowMs: 25, tapMode: 'GHOST' }
+        normal: { attempts: 10, tapIntervalMs: 8, verifyDelayMs: 10, tapMode: 'CENTER' },
+        medium: { attempts: 15, tapIntervalMs: 8, verifyDelayMs: 10, tapMode: 'GHOST' },
+        high_speed: { attempts: 25, attemptsSlow: 25, tapIntervalMs: 5, verifyDelayMs: 10, verifyDelaySlowMs: 15, tapMode: 'GHOST' }
     },
-    // 🛑 NEW: UI Mismatch Fix (Ignore side menu texts)
+    // 🛑 NEW: UI Mismatch Fix (Ignore side menu texts & Namma Yatri Popups)
     filters: {
         ignore_text: [
             "Close drawer", "Earnings", "Trips", "Preferences", "Plans", "Benefits", "Store", "Help", "About", "Google Maps",
-            "My Profile", "Access Fee", "Miles Bonus", "Rewards", "Service Manager", "Activation Status", "Refer friends", "Get New Vehicle Numbers", "Tap to Earn"
+            "My Profile", "Access Fee", "Miles Bonus", "Rewards", "Service Manager", "Activation Status", "Refer friends", "Get New Vehicle Numbers", "Tap to Earn",
+            "You missed the order", "accepted by another captain", "Go To ON", "Orders Missed", "Sorry",
+            "New version ready", "Tap Restart", "Restart", "Manage Plan", "Active Plan", "UPI Autopay", "Alternate Plan", "Enjoy UNLIMITED", "Aarokya", "Open Data", "Bottom S"
         ]
     }
 };
