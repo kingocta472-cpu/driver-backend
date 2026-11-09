@@ -550,13 +550,22 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
         CityRide: { package_names: ["in.cityride.driver"], accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
     },
-    // SPEED: refresh every 5 minutes
-    global: { max_ride_cycle_duration_ms: 8000, watchdog_interval_ms: 2000, health_check_interval_ms: 300000, config_refresh_interval_ms: 300000, maxRideCycleDurationMs: 8000, watchdogIntervalMs: 2000, healthCheckIntervalMs: 300000, configRefreshIntervalMs: 300000 },
-    // 🚀 SPEED: Tuned strategies for higher success rate without getting banned
+    // SPEED: cycle ko 3 second kiya taaki lag na ho
+    global: { 
+        max_ride_cycle_duration_ms: 3000, 
+        watchdog_interval_ms: 1000, 
+        health_check_interval_ms: 300000, 
+        config_refresh_interval_ms: 300000, 
+        maxRideCycleDurationMs: 3000, 
+        watchdogIntervalMs: 1000, 
+        healthCheckIntervalMs: 300000, 
+        configRefreshIntervalMs: 300000 
+    },
+    // 🚀 SPEED: tapInterval 10ms kiya (phone freeze nahi hoga)
     strategies: {
-        normal: { attempts: 15, tapIntervalMs: 10, verifyDelayMs: 15, tapMode: 'CENTER' },
-        medium: { attempts: 20, tapIntervalMs: 5, verifyDelayMs: 10, tapMode: 'GHOST' },
-        high_speed: { attempts: 30, attemptsSlow: 30, tapIntervalMs: 1, verifyDelayMs: 2, verifyDelaySlowMs: 5, tapMode: 'GHOST' }
+        normal: { attempts: 8, tapIntervalMs: 10, verifyDelayMs: 15, tapMode: 'CENTER' },
+        medium: { attempts: 12, tapIntervalMs: 10, verifyDelayMs: 10, tapMode: 'GHOST' },
+        high_speed: { attempts: 10, attemptsSlow: 12, tapIntervalMs: 10, verifyDelayMs: 5, verifyDelaySlowMs: 10, tapMode: 'GHOST' }
     },
     // 🛑 NEW: UI Mismatch Fix (Ignore side menu texts)
     filters: {
