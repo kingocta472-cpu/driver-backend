@@ -26,12 +26,10 @@ app.use(express.json({ limit: '1mb' }));
 // ============================================================
 // SPEED CACHES (new)
 // ============================================================
-// Ride-bot config response cache (10 sec) - cleared on every admin change.
 let rideConfigCache = { at: 0, body: null };
 const RIDE_CONFIG_CACHE_MS = 10000;
 function clearRideConfigCache() { rideConfigCache = { at: 0, body: null }; }
 
-// uid -> user doc cache (60 sec) - avoids a Firestore query on every request.
 const userByUidCache = new Map();
 const USER_CACHE_MS = 60000;
 
@@ -183,7 +181,6 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ UPDATED FORCE UPDATE VERSION v1.19.6
 const APP_LATEST_VERSION = '1.19.6';
 const APP_MINIMUM_VERSION = '1.19.6'; // ✅ Force update ke liye minimum version v1.19.6
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.6/app-release.apk'; 
@@ -515,7 +512,6 @@ function validateRemoteRideConfig(input) {
             if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`strategies.${name} must be an object.`);
             const s = {};
             for (const [key, value] of Object.entries(cfg)) {
-                // SPEED: limits opened (attempts 1-30, delays 1-1000 ms)
                 if (['attempts', 'attemptsSlow', 'attempts_slow'].includes(key)) s[key] = Math.round(num(value, 1, 30, `${name}.${key}`));
                 else if (['tapIntervalMs', 'tap_interval_ms', 'verifyDelayMs', 'verify_delay_ms', 'verifyDelaySlowMs', 'verify_delay_slow_ms'].includes(key)) s[key] = Math.round(num(value, 1, 1000, `${name}.${key}`));
                 else if (key === 'tapMode') {
@@ -528,7 +524,6 @@ function validateRemoteRideConfig(input) {
         }
     }
 
-    // ✅ NEW: controls object (bot_enabled / auto_accept_enabled) - Android isRemoteAutoAcceptEnabled() padhta hai
     if (input.controls !== undefined) {
         if (typeof input.controls !== 'object' || Array.isArray(input.controls) || !input.controls) {
             throw new Error('controls must be an object.');
@@ -545,26 +540,14 @@ function validateRemoteRideConfig(input) {
 }
 
 const RIDE_BOT_CONFIG_DATA_KEY = 'ride-bot-config-data';
-// 🛑 BLOCKED PACKAGES (Passenger & Wallet apps)
 const BLOCKED_DRIVER_PACKAGE_IDS = new Set([
     'in.juspay.nammayatri',
-    // Uber
     'com.ubercab', 'com.ubercab.eats', 'com.postmates.android', 'com.uber.restaurants', 'com.uber.restaurantmanager',
-    // Ola
     'com.olacabs.customer', 'com.olacabs.olamoney',
-    // Rapido
     'com.rapido.rider',
-    // Namma Yatri
     'in.mobility.keralasavaariconsumer', 'com.mobility.movingtech', 'net.openkochi.yatri'
 ]);
 
-// ✅ FIX 1: Android DriverAccessibilityService.kt ke saath fully aligned defaults.
-// - platforms[P].enabled field add ki (Android remotePlatformEnabled padhta hai)
-// - accept_keywords sahi kiye (Match / Accept Trip / Confirm)
-// - success_signals ko strong-signals only rakha (Android weak-signal filter hata deta hai)
-// - global mein sab Android remoteLong/remoteDouble keys add ki
-// - controls block add kiya (Android isRemoteAutoAcceptEnabled)
-// - filters mein Android loadFilter() / remoteFilterNumber()/remoteFilterStringList() ke saare keys add kiye
 const DEFAULT_RIDE_BOT_CONFIG = {
     platforms: {
         Uber: {
@@ -653,67 +636,46 @@ const DEFAULT_RIDE_BOT_CONFIG = {
             view_id_patterns: ["accept", "confirm"]
         }
     },
-    // ⚡ SPEED: cycle 1 second (1000ms), Android file ke remoteLong keys ke saath aligned
     global: {
-        // bot on/off switches (Android isRemoteAutoAcceptEnabled padhta hai)
         bot_enabled: true,
         auto_accept_enabled: true,
-
-        // speed / cycle
         max_ride_cycle_duration_ms: 1000,
         maxRideCycleDurationMs: 1000,
         watchdog_interval_ms: 1000,
         watchdogIntervalMs: 1000,
-
-        // refresh / health
         config_refresh_interval_ms: 300000,
         configRefreshIntervalMs: 300000,
         health_check_interval_ms: 300000,
         healthCheckIntervalMs: 300000,
-
-        // tap tuning (Android fallback: 20ms normal, 40ms slow)
         node_null_delay_ms: 20,
         nodeNullDelayMs: 20,
-
-        // debounce (Android fallback: 5ms normal, 20ms slow)
         debounce_normal_ms: 5,
         debounceNormalMs: 5,
         debounce_slow_ms: 20,
         debounceSlowMs: 20,
-
-        // location
         location_min_time_ms: 5000,
         locationMinTimeMs: 5000,
         location_min_distance_m: 50,
         locationMinDistanceM: 50,
-
-        // plan offline grace
         plan_offline_grace_ms: 1800000,
         planOfflineGraceMs: 1800000
     },
-    // 🔁 Android isRemoteAutoAcceptEnabled() yeh bhi check karta hai
     controls: {
         bot_enabled: true,
         auto_accept_enabled: true
     },
-    // 🚀 SPEED: Clicks kam kiye (6, 8, 12) taaki phone freeze na ho
     strategies: {
         normal: { attempts: 6, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, tapMode: 'CENTER' },
         medium: { attempts: 8, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, tapMode: 'GHOST' },
         high_speed: { attempts: 12, attemptsSlow: 12, attempts_slow: 12, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, verifyDelaySlowMs: 5, verify_delay_slow_ms: 5, tapMode: 'GHOST' }
     },
-    // 🎯 Android loadFilter() + remoteFilterNumber()/remoteFilterStringList() inhe padhta hai
     filters: {
         enabled: true,
         keyword_mode: "ANY",
-
-        // fare (0 = no limit; Android takeIf { it > 0.0 } se filter ho jaata hai)
         minimum_fare: 0,
         minimumFare: 0,
         maximum_fare: 0,
         maximumFare: 0,
-
-        // distances (km, 0 = no limit)
         maximum_pickup_distance_km: 0,
         maximumPickupDistanceKm: 0,
         maximum_drop_distance_km: 0,
@@ -722,12 +684,8 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         maximumTripDistanceKm: 0,
         minimum_trip_distance_km: 0,
         minimumTripDistanceKm: 0,
-
-        // work zone
         work_zone_radius_km: 5,
         workZoneRadiusKm: 5,
-
-        // vehicle / keyword lists
         allowed_vehicles: ["AUTO", "CAR", "BIKE"],
         allowedVehicles: ["AUTO", "CAR", "BIKE"],
         target_areas: [],
@@ -772,7 +730,6 @@ async function verifyFirebaseToken(req, res, next) {
         const decoded = await decodeFirebaseToken(req);
         if (!decoded.uid) return res.status(401).json({ success: false, message: 'Invalid Firebase user.' });
 
-        // SPEED: cached user lookup (60 sec) instead of a Firestore query every request
         let cachedUser = userByUidCache.get(decoded.uid);
         if (!cachedUser || Date.now() - cachedUser.at > USER_CACHE_MS) {
             const db = getDB();
@@ -851,7 +808,6 @@ async function createUniqueReferralCode(db, userRef) {
 // ============================================================
 app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!'); });
 
-// ✅ FORCE UPDATE LOGIC ADDED HERE
 app.get('/api/app/update', (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -860,13 +816,12 @@ app.get('/api/app/update', (req, res) => {
         const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
         const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
         
-        // ✅ Check if current version is less than minimum required version
         const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
         const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
 
         return res.json({
             success: true, latestVersion: APP_LATEST_VERSION, minimumVersion: APP_MINIMUM_VERSION,
-            forceUpdate: forceUpdate, // ✅ Ab dynamic force update
+            forceUpdate: forceUpdate, 
             updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
             updateAvailable, apkUrl: APP_APK_URL, message: APP_UPDATE_MESSAGE,
             title: APP_UPDATE_TITLE, releaseNotes: APP_RELEASE_NOTES, currentVersion: currentVersion || null
@@ -874,7 +829,6 @@ app.get('/api/app/update', (req, res) => {
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to check app update status.' }); }
 });
 
-// SPEED: cached + parallel Redis reads
 app.get('/api/config/ride-bot', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -915,7 +869,6 @@ app.post('/api/admin/config/ride-bot', async (req, res) => {
     } catch (error) { return res.status(400).json({ success: false, message: error.message || 'Unable to save remote config.' }); }
 });
 
-// NEW: wipe stored (old/slow) config from Redis so code defaults become active
 app.post('/api/admin/config/reset', async (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
     try {
@@ -1034,9 +987,6 @@ app.get('/api/admin/dashboard', async (req, res) => {
 app.get('/api/admin/tracker', async (req, res) => { return handleDriverTrackerAdmin(req, res); });
 app.get('/api/test', (req, res) => { res.json({ success: true, message: 'Android app successfully connected to Firebase backend!', timestamp: new Date().toISOString() }); });
 
-// ============================================================
-// LOGIN / REGISTER ✅ APP CHECK VERIFIED
-// ============================================================
 app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
     try {
         const phone = normalizePhone(req.body.phone);
@@ -1231,7 +1181,6 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
 
         await notifyNewRegistrationIfNeeded(phone, isNewUser);
 
-        // fresh login -> drop any stale cached user for this uid
         userByUidCache.delete(driverFirebaseUid);
 
         return res.json({
@@ -1299,14 +1248,12 @@ app.get('/api/referral/me', verifyFirebaseToken, async (req, res) => {
     }
 });
 
-// SPEED: uses cached user (no Firestore read); falls back to a fresh read only if cache says expired
 app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = normalizePhone(req.body.phone);
         if (!phoneMatchesAuthenticatedUser(req, phone)) return res.status(403).json({ success: false, message: 'You can only use your own account.' });
         let userData = req.driverUser || {};
         if (Number(userData.planExpiry || 0) <= Date.now()) {
-            // cache may be stale (e.g. just recharged) - confirm with a fresh read
             const fresh = await getDB().collection('users').doc(phone).get();
             if (!fresh.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
             userData = fresh.data() || {};
@@ -1328,9 +1275,6 @@ app.post('/api/ride/refund-credit', verifyFirebaseToken, async (req, res) => {
     return res.json({ success: true, refunded: false, alreadyRefunded: false, message: 'Refund not applicable in time-based system.' });
 });
 
-// ------------------------------------------------------------
-// PAYU HOSTED CHECKOUT (Razorpay routes below remain unchanged)
-// ------------------------------------------------------------
 app.get('/api/payment/providers', verifyFirebaseToken, async (req, res) => {
     const razorpayEnabled = Boolean(
         String(process.env.RAZORPAY_KEY_ID || '').trim() &&
@@ -1585,7 +1529,6 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         let unknownPackageAutoApproval = null;
         if (issueType === 'UNKNOWN_PACKAGE' && platform === 'UNKNOWN' && packageName !== 'unknown') {
             try {
-                // SPEED: don't make the app wait more than 4 sec for Google Play checks
                 unknownPackageAutoApproval = await Promise.race([
                     tryAutoApproveReportedUnknownPackage(packageName),
                     new Promise((_, reject) => setTimeout(() => reject(new Error('verification timeout')), 4000))
@@ -1604,7 +1547,6 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             .digest('hex');
         const reportRef = getDB().collection('compatibilityReports').doc(dedupeId);
         
-        // Instant Telegram alerts disabled (spam). Reports go into the 30-minute digest.
         let shouldSendTelegram = false;
 
         await getDB().runTransaction(async transaction => {
@@ -1692,9 +1634,6 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
     }
 });
 
-// ============================================================
-// GOOGLE PLAY PACKAGE DISCOVERY + VERIFIED AUTO-APPROVAL
-// ============================================================
 const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'];
 const PLAY_STORE_MONITOR_DEFAULTS = {
     Uber: {
@@ -2228,9 +2167,11 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         });
         if (!claimed) return res.json({ success: true, skipped: true, halfHourKey });
 
-        // Data is picked by 'receivedAt' (when the server got the report) so no report is missed.
         const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
         const telemetryHourly = await db.collection('driverHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
+        
+        // ✅ FIX: Immediate Events (Success/Failure alerts) ko bhi count karein
+        const telemetryEvents = await db.collection('driverTelemetryEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
 
         let success = 0, failed = 0;
         let reasonsMap = {};
@@ -2257,6 +2198,20 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
 
         addData(telemetryHalfHourly.docs);
         addData(telemetryHourly.docs);
+
+        // ✅ IMMEDIATE EVENTS PROCESS KAREIN
+        telemetryEvents.forEach(doc => {
+            const d = doc.data() || {};
+            const type = String(d.type || '').toUpperCase();
+            reportingDrivers.add(d.driverKey);
+
+            if (type === 'SUCCESS') {
+                success++;
+            } else if (['FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'NO_RIDE_DETECTED_5MIN'].includes(type)) {
+                failed++;
+                reasonsMap[type] = (reasonsMap[type] || 0) + 1;
+            }
+        });
 
         const totalRides = success + failed;
         const successPct = totalRides ? success * 100 / totalRides : 0;
@@ -2318,7 +2273,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
             reasonsText,
             '',
             `🔧 Compatibility issues: ${issueText}${issueDetailsText}`,
-            'Note: Data is a mix of Hourly and 30-Min reports.'
+            'Note: Data is a mix of Hourly, 30-Min and Instant Events.'
         ].join('\n');
 
         try {
@@ -2409,9 +2364,6 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
     } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' }); }
 });
 
-// ============================================================
-// TELEGRAM WEBHOOK FOR INLINE BUTTONS
-// ============================================================
 app.post('/api/telegram/webhook', async (req, res) => {
     try {
         const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '');
@@ -2483,7 +2435,4 @@ app.post('/api/telegram/webhook', async (req, res) => {
     }
 });
 
-// ============================================================
-// EXPORT APP
-// ============================================================
 module.exports = app;
