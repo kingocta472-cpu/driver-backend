@@ -184,7 +184,7 @@ const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
 const APP_LATEST_VERSION = '1.19.5';
-const APP_MINIMUM_VERSION = '1.19.5';
+const APP_MINIMUM_VERSION = '1.0.0'; // ✅ Force update hatane ke liye minimum version 1.0.0 kar diya
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.5/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
 const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.5) install karein.';
@@ -428,6 +428,7 @@ function mergeConfigObjects(base, override) {
     }
     merged.global = { ...base.global, ...(override.global || {}) };
     merged.filters = { ...(base.filters || {}), ...(override.filters || {}) };
+    merged.controls = { ...(base.controls || {}), ...(override.controls || {}) };
     merged.strategies = mergeStrategies(base.strategies, override.strategies);
     return merged;
 }
@@ -525,6 +526,20 @@ function validateRemoteRideConfig(input) {
             out.strategies[name] = s;
         }
     }
+
+    // ✅ NEW: controls object (bot_enabled / auto_accept_enabled) - Android isRemoteAutoAcceptEnabled() padhta hai
+    if (input.controls !== undefined) {
+        if (typeof input.controls !== 'object' || Array.isArray(input.controls) || !input.controls) {
+            throw new Error('controls must be an object.');
+        }
+        out.controls = {};
+        for (const [key, value] of Object.entries(input.controls)) {
+            if (!KEY_RE.test(key)) throw new Error(`Invalid controls key: ${key}`);
+            if (typeof value !== 'boolean') throw new Error(`controls.${key} must be a boolean.`);
+            out.controls[key] = value;
+        }
+    }
+
     return out;
 }
 
@@ -542,38 +557,186 @@ const BLOCKED_DRIVER_PACKAGE_IDS = new Set([
     'in.mobility.keralasavaariconsumer', 'com.mobility.movingtech', 'net.openkochi.yatri'
 ]);
 
+// ✅ FIX 1: Android DriverAccessibilityService.kt ke saath fully aligned defaults.
+// - platforms[P].enabled field add ki (Android remotePlatformEnabled padhta hai)
+// - accept_keywords sahi kiye (Match / Accept Trip / Confirm)
+// - success_signals ko strong-signals only rakha (Android weak-signal filter hata deta hai)
+// - global mein sab Android remoteLong/remoteDouble keys add ki
+// - controls block add kiya (Android isRemoteAutoAcceptEnabled)
+// - filters mein Android loadFilter() / remoteFilterNumber()/remoteFilterStringList() ke saare keys add kiye
 const DEFAULT_RIDE_BOT_CONFIG = {
     platforms: {
-        Uber: { package_names: ["com.ubercab.driver"], accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "match", "confirm"] },
-        Ola: { package_names: ["com.olacabs.driver", "com.olacabs.oladriver"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "otp submit", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
-        Rapido: { package_names: ["com.rapido.driver"], accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "client located", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "order"] },
-        "Namma Yatri": { package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"], accept_keywords: ["Accept", "Accept Ride", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] },
-        CityRide: { package_names: ["in.cityride.driver"], accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"], success_signals: ["start ride", "go to pickup", "going to pickup", "picking up", "pick up location", "navigate", "pickup", "confirm otp", "enter otp", "verify otp", "otp", "arrived", "reached", "waiting", "trip started", "start trip", "rider details", "customer details", "driver details", "you have accepted", "ride accepted", "accepted the ride", "you're on your way", "on the way"], view_id_patterns: ["accept", "confirm"] }
+        Uber: {
+            enabled: true,
+            package_names: ["com.ubercab.driver"],
+            accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"],
+            success_signals: [
+                "start ride", "start trip", "begin trip", "trip started", "ride started",
+                "trip in progress", "on trip", "go to pickup", "going to pickup",
+                "navigate to pickup", "arrived at pickup", "reached pickup",
+                "waiting for rider", "waiting for customer", "waiting for passenger",
+                "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit",
+                "call rider", "call customer", "call passenger",
+                "chat with rider", "message rider", "chat with customer",
+                "you have accepted", "ride accepted", "trip accepted",
+                "accepted the ride", "booking accepted", "order accepted"
+            ],
+            view_id_patterns: ["accept", "match", "confirm"]
+        },
+        Ola: {
+            enabled: true,
+            package_names: ["com.olacabs.driver", "com.olacabs.oladriver"],
+            accept_keywords: ["Match", "Accept", "Accept Ride", "Accept Trip", "Confirm"],
+            success_signals: [
+                "start ride", "start trip", "begin trip", "trip started", "ride started",
+                "trip in progress", "on trip", "go to pickup", "going to pickup",
+                "navigate to pickup", "arrived at pickup", "reached pickup",
+                "waiting for rider", "waiting for customer", "waiting for passenger",
+                "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit",
+                "call rider", "call customer", "call passenger",
+                "chat with rider", "message rider", "chat with customer",
+                "you have accepted", "ride accepted", "trip accepted",
+                "accepted the ride", "booking accepted", "order accepted"
+            ],
+            view_id_patterns: ["accept", "confirm"]
+        },
+        Rapido: {
+            enabled: true,
+            package_names: ["com.rapido.driver"],
+            accept_keywords: ["Accept Order", "Accept", "Accept Ride", "Accept Trip", "Confirm", "Match"],
+            success_signals: [
+                "start ride", "start trip", "begin trip", "trip started", "ride started",
+                "trip in progress", "on trip", "go to pickup", "going to pickup",
+                "navigate to pickup", "arrived at pickup", "reached pickup",
+                "waiting for rider", "waiting for customer", "waiting for passenger",
+                "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit",
+                "call rider", "call customer", "call passenger",
+                "chat with rider", "message rider", "chat with customer",
+                "you have accepted", "ride accepted", "trip accepted",
+                "accepted the ride", "booking accepted", "order accepted"
+            ],
+            view_id_patterns: ["accept", "order"]
+        },
+        "Namma Yatri": {
+            enabled: true,
+            package_names: ["net.openkochi.yatripartner", "in.juspay.nammayatripartner", "in.mobility.manayatripartner", "com.nammayatri", "com.mobility.movingtechdriver"],
+            accept_keywords: ["Confirm", "Accept", "Accept Ride", "Accept Trip", "Match"],
+            success_signals: [
+                "start ride", "start trip", "begin trip", "trip started", "ride started",
+                "trip in progress", "on trip", "go to pickup", "going to pickup",
+                "navigate to pickup", "arrived at pickup", "reached pickup",
+                "waiting for rider", "waiting for customer", "waiting for passenger",
+                "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit",
+                "call rider", "call customer", "call passenger",
+                "chat with rider", "message rider", "chat with customer",
+                "you have accepted", "ride accepted", "trip accepted",
+                "accepted the ride", "booking accepted", "order accepted"
+            ],
+            view_id_patterns: ["accept", "confirm"]
+        },
+        CityRide: {
+            enabled: true,
+            package_names: ["in.cityride.driver"],
+            accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"],
+            success_signals: [
+                "start ride", "start trip", "begin trip", "trip started", "ride started",
+                "trip in progress", "on trip", "go to pickup", "going to pickup",
+                "navigate to pickup", "arrived at pickup", "reached pickup",
+                "waiting for rider", "waiting for customer", "waiting for passenger",
+                "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit",
+                "call rider", "call customer", "call passenger",
+                "chat with rider", "message rider", "chat with customer",
+                "you have accepted", "ride accepted", "trip accepted",
+                "accepted the ride", "booking accepted", "order accepted"
+            ],
+            view_id_patterns: ["accept", "confirm"]
+        }
     },
-    // SPEED: cycle ko 500ms kiya aur delays ko balance kiya taaki phone freeze na ho
-    global: { 
-        max_ride_cycle_duration_ms: 500, 
-        watchdog_interval_ms: 1000, 
-        health_check_interval_ms: 300000, 
-        config_refresh_interval_ms: 300000, 
-        maxRideCycleDurationMs: 500, 
-        watchdogIntervalMs: 1000, 
-        healthCheckIntervalMs: 300000, 
-        configRefreshIntervalMs: 300000 
+    // ⚡ SPEED: cycle 1 second (1000ms), Android file ke remoteLong keys ke saath aligned
+    global: {
+        // bot on/off switches (Android isRemoteAutoAcceptEnabled padhta hai)
+        bot_enabled: true,
+        auto_accept_enabled: true,
+
+        // speed / cycle
+        max_ride_cycle_duration_ms: 1000,
+        maxRideCycleDurationMs: 1000,
+        watchdog_interval_ms: 1000,
+        watchdogIntervalMs: 1000,
+
+        // refresh / health
+        config_refresh_interval_ms: 300000,
+        configRefreshIntervalMs: 300000,
+        health_check_interval_ms: 300000,
+        healthCheckIntervalMs: 300000,
+
+        // tap tuning (Android fallback: 20ms normal, 40ms slow)
+        node_null_delay_ms: 20,
+        nodeNullDelayMs: 20,
+
+        // debounce (Android fallback: 5ms normal, 20ms slow)
+        debounce_normal_ms: 5,
+        debounceNormalMs: 5,
+        debounce_slow_ms: 20,
+        debounceSlowMs: 20,
+
+        // location
+        location_min_time_ms: 5000,
+        locationMinTimeMs: 5000,
+        location_min_distance_m: 50,
+        locationMinDistanceM: 50,
+
+        // plan offline grace
+        plan_offline_grace_ms: 1800000,
+        planOfflineGraceMs: 1800000
     },
+    // 🔁 Android isRemoteAutoAcceptEnabled() yeh bhi check karta hai
+    controls: {
+        bot_enabled: true,
+        auto_accept_enabled: true
+    },
+    // 🚀 SPEED: Clicks kam kiye (6, 8, 12) taaki phone freeze na ho
     strategies: {
-        normal: { attempts: 10, tapIntervalMs: 8, verifyDelayMs: 10, tapMode: 'CENTER' },
-        medium: { attempts: 15, tapIntervalMs: 8, verifyDelayMs: 10, tapMode: 'GHOST' },
-        high_speed: { attempts: 25, attemptsSlow: 25, tapIntervalMs: 5, verifyDelayMs: 10, verifyDelaySlowMs: 15, tapMode: 'GHOST' }
+        normal: { attempts: 6, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, tapMode: 'CENTER' },
+        medium: { attempts: 8, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, tapMode: 'GHOST' },
+        high_speed: { attempts: 12, attemptsSlow: 12, attempts_slow: 12, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, verifyDelaySlowMs: 5, verify_delay_slow_ms: 5, tapMode: 'GHOST' }
     },
-    // 🛑 NEW: UI Mismatch Fix (Ignore side menu texts & Namma Yatri Popups)
+    // 🎯 Android loadFilter() + remoteFilterNumber()/remoteFilterStringList() inhe padhta hai
     filters: {
-        ignore_text: [
-            "Close drawer", "Earnings", "Trips", "Preferences", "Plans", "Benefits", "Store", "Help", "About", "Google Maps",
-            "My Profile", "Access Fee", "Miles Bonus", "Rewards", "Service Manager", "Activation Status", "Refer friends", "Get New Vehicle Numbers", "Tap to Earn",
-            "You missed the order", "accepted by another captain", "Go To ON", "Orders Missed", "Sorry",
-            "New version ready", "Tap Restart", "Restart", "Manage Plan", "Active Plan", "UPI Autopay", "Alternate Plan", "Enjoy UNLIMITED", "Aarokya", "Open Data", "Bottom S"
-        ]
+        enabled: true,
+        keyword_mode: "ANY",
+
+        // fare (0 = no limit; Android takeIf { it > 0.0 } se filter ho jaata hai)
+        minimum_fare: 0,
+        minimumFare: 0,
+        maximum_fare: 0,
+        maximumFare: 0,
+
+        // distances (km, 0 = no limit)
+        maximum_pickup_distance_km: 0,
+        maximumPickupDistanceKm: 0,
+        maximum_drop_distance_km: 0,
+        maximumDropDistanceKm: 0,
+        maximum_trip_distance_km: 0,
+        maximumTripDistanceKm: 0,
+        minimum_trip_distance_km: 0,
+        minimumTripDistanceKm: 0,
+
+        // work zone
+        work_zone_radius_km: 5,
+        workZoneRadiusKm: 5,
+
+        // vehicle / keyword lists
+        allowed_vehicles: ["AUTO", "CAR", "BIKE"],
+        allowedVehicles: ["AUTO", "CAR", "BIKE"],
+        target_areas: [],
+        targetAreas: [],
+        blocked_areas: [],
+        blockedAreas: [],
+        required_keywords: [],
+        requiredKeywords: [],
+        blocked_keywords: [],
+        blockedKeywords: []
     }
 };
 
@@ -687,18 +850,19 @@ async function createUniqueReferralCode(db, userRef) {
 // ============================================================
 app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!'); });
 
+// ✅ FIX: Force update logic hataya gaya hai
 app.get('/api/app/update', (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
         res.set('Pragma', 'no-cache'); res.set('Expires', '0');
         const currentVersion = String(req.query.currentVersion || '').trim();
         const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
-        const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
         const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
-        const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
+        
         return res.json({
             success: true, latestVersion: APP_LATEST_VERSION, minimumVersion: APP_MINIMUM_VERSION,
-            forceUpdate, updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
+            forceUpdate: false, // Hamesha false rahega
+            updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
             updateAvailable, apkUrl: APP_APK_URL, message: APP_UPDATE_MESSAGE,
             title: APP_UPDATE_TITLE, releaseNotes: APP_RELEASE_NOTES, currentVersion: currentVersion || null
         });
