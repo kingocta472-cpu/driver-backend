@@ -183,12 +183,13 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-const APP_LATEST_VERSION = '1.19.5';
-const APP_MINIMUM_VERSION = '1.0.0'; // ✅ Force update hatane ke liye minimum version 1.0.0 kar diya
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.5/app-release.apk'; 
+// ✅ UPDATED FORCE UPDATE VERSION v1.19.6
+const APP_LATEST_VERSION = '1.19.6';
+const APP_MINIMUM_VERSION = '1.19.6'; // ✅ Force update ke liye minimum version v1.19.6
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.6/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.5) install karein.';
-const APP_RELEASE_NOTES = 'v1.19.5: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.6) install karein.';
+const APP_RELEASE_NOTES = 'v1.19.6: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -850,7 +851,7 @@ async function createUniqueReferralCode(db, userRef) {
 // ============================================================
 app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!'); });
 
-// ✅ FIX: Force update logic hataya gaya hai
+// ✅ FORCE UPDATE LOGIC ADDED HERE
 app.get('/api/app/update', (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -859,9 +860,13 @@ app.get('/api/app/update', (req, res) => {
         const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
         const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
         
+        // ✅ Check if current version is less than minimum required version
+        const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
+        const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
+
         return res.json({
             success: true, latestVersion: APP_LATEST_VERSION, minimumVersion: APP_MINIMUM_VERSION,
-            forceUpdate: false, // Hamesha false rahega
+            forceUpdate: forceUpdate, // ✅ Ab dynamic force update
             updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
             updateAvailable, apkUrl: APP_APK_URL, message: APP_UPDATE_MESSAGE,
             title: APP_UPDATE_TITLE, releaseNotes: APP_RELEASE_NOTES, currentVersion: currentVersion || null
