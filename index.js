@@ -1,5 +1,5 @@
 /*
- * Driver Ride Picker backend. (FINAL SPEED-OPTIMIZED VERSION)
+ * Driver Ride Picker backend. (FINAL - NO FORCED UPDATE, ALL VERSIONS ALLOWED)
  */
 
 const express = require('express');
@@ -24,7 +24,7 @@ app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // ============================================================
-// SPEED CACHES (new)
+// SPEED CACHES
 // ============================================================
 let rideConfigCache = { at: 0, body: null };
 const RIDE_CONFIG_CACHE_MS = 10000;
@@ -181,13 +181,13 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ FIXED: Force update hataya gaya hai. Sabhi versions allowed hain.
+// ✅ NO FORCED UPDATE: koi bhi app version chalega, update kabhi nahi maangega.
+// Ye values sirf info ke liye hain. /api/app/update hamesha "update nahi chahiye" bhejta hai.
 const APP_LATEST_VERSION = '1.19.8';
-const APP_MINIMUM_VERSION = '1.0.0'; // ✅ Ab koi bhi version chalega
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.8/app-release.apk'; 
-const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.8) install karein.';
-const APP_RELEASE_NOTES = 'v1.19.8: Bug fixes, better performance, multi-version support.'; 
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.8/app-release.apk';
+const APP_UPDATE_TITLE = 'Driver Ride Picker';
+const APP_UPDATE_MESSAGE = 'Aap latest version use kar rahe hain.';
+const APP_RELEASE_NOTES = 'All app versions are supported.';
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -273,21 +273,6 @@ function isValidPin(pin) { return new RegExp(`^\\d{${PIN_LENGTH}}$`).test(String
 function isPlanActive(userData) { return userData && Number(userData.planExpiry || 0) > Date.now(); }
 function getActivePlanType(userData) { return isPlanActive(userData) ? String(userData.activePlan || PLAN_TYPE_NONE) : PLAN_TYPE_NONE; }
 
-function parseVersion(version) {
-    const cleaned = String(version || '').trim().replace(/^v/i, '');
-    if (!/^\d+(?:\.\d+){0,3}$/.test(cleaned)) return null;
-    return cleaned.split('.').map(part => Number(part));
-}
-function compareVersions(left, right) {
-    const a = parseVersion(left); const b = parseVersion(right);
-    if (!a || !b) return null;
-    const length = Math.max(a.length, b.length);
-    for (let i = 0; i < length; i++) {
-        const av = a[i] || 0; const bv = b[i] || 0;
-        if (av > bv) return 1; if (av < bv) return -1;
-    }
-    return 0;
-}
 function generateReferralCode() {
     const bytes = crypto.randomBytes(REFERRAL_CODE_LENGTH);
     let code = '';
@@ -825,23 +810,31 @@ async function createUniqueReferralCode(db, userRef) {
 // ============================================================
 app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!'); });
 
+// ✅ NO UPDATE REQUIRED FOR ANY VERSION
+// Backend hamesha bolta hai: "update available = false, force update = false".
+// latestVersion = jo version app ne bheja wahi wapas bheja jata hai, taaki app
+// khud compare kare to bhi "latest" hi nikle. Minimum version 0.0.0 hai.
 app.get('/api/app/update', (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
         res.set('Pragma', 'no-cache'); res.set('Expires', '0');
-        const currentVersion = String(req.query.currentVersion || '').trim();
-        const currentVsLatest = compareVersions(currentVersion, APP_LATEST_VERSION);
-        const updateAvailable = currentVersion ? (currentVsLatest !== null && currentVsLatest < 0) : true;
-        
-        const currentVsMinimum = compareVersions(currentVersion, APP_MINIMUM_VERSION);
-        const forceUpdate = currentVersion ? (currentVsMinimum !== null && currentVsMinimum < 0) : false;
-
+        const currentVersion = String(req.query.currentVersion || req.query.version || req.query.appVersion || '').trim();
+        const effectiveVersion = currentVersion || APP_LATEST_VERSION;
         return res.json({
-            success: true, latestVersion: APP_LATEST_VERSION, minimumVersion: APP_MINIMUM_VERSION,
-            forceUpdate: forceUpdate, 
-            updateMessage: APP_UPDATE_MESSAGE, downloadUrl: APP_APK_URL,
-            updateAvailable, apkUrl: APP_APK_URL, message: APP_UPDATE_MESSAGE,
-            title: APP_UPDATE_TITLE, releaseNotes: APP_RELEASE_NOTES, currentVersion: currentVersion || null
+            success: true,
+            latestVersion: effectiveVersion,
+            minimumVersion: '0.0.0',
+            forceUpdate: false,
+            updateAvailable: false,
+            updateRequired: false,
+            mandatory: false,
+            updateMessage: APP_UPDATE_MESSAGE,
+            message: APP_UPDATE_MESSAGE,
+            title: APP_UPDATE_TITLE,
+            releaseNotes: APP_RELEASE_NOTES,
+            downloadUrl: APP_APK_URL,
+            apkUrl: APP_APK_URL,
+            currentVersion: currentVersion || null
         });
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to check app update status.' }); }
 });
@@ -1541,7 +1534,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         const reason = String(req.body.reason || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 1000) || 'No detailed reason supplied.';
         const recommendedAction = String(req.body.recommendedAction || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 500) || 'Review the app compatibility and update remote config or APK as required.';
         
-        // ✅ FIXED: Faltu ke UI_MISMATCH (Drawer, Bottom sheet, Location) block kiye gaye hain
+        // Faltu ke UI_MISMATCH (Drawer, Bottom sheet, Location) block
         if (issueType === 'UI_MISMATCH') {
             const lowerReason = reason.toLowerCase();
             const ignoreKeywords = [
@@ -1551,7 +1544,6 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
                 "logout", "help", "about", "store", "language: english"
             ];
             if (ignoreKeywords.some(kw => lowerReason.includes(kw))) {
-                // Ignore silently so it doesn't spam Telegram
                 return res.json({ success: true, accepted: false, message: 'Ignored known non-ride screen.' });
             }
         }
@@ -2203,7 +2195,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
         const telemetryHourly = await db.collection('driverHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
         
-        // ✅ FIXED: Immediate Events (Success/Failure alerts) ko bhi count karein
+        // Immediate Events (Success/Failure alerts) ko bhi count karein
         const telemetryEvents = await db.collection('driverTelemetryEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
 
         let success = 0, failed = 0;
@@ -2218,7 +2210,6 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
                 success += suc;
                 failed += fail;
                 
-                // ✅ FIXED: Sirf wahi driver count karo jisne actual ride (success/fail) report ki hai
                 if (suc > 0 || fail > 0) {
                     reportingDrivers.add(d.driverKey);
                 }
@@ -2238,7 +2229,6 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         addData(telemetryHalfHourly.docs);
         addData(telemetryHourly.docs);
 
-        // ✅ IMMEDIATE EVENTS PROCESS KAREIN
         telemetryEvents.forEach(doc => {
             const d = doc.data() || {};
             const type = String(d.type || '').toUpperCase();
