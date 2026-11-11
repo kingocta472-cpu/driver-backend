@@ -664,10 +664,11 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         bot_enabled: true,
         auto_accept_enabled: true
     },
+    // ✅ FIX: Speed ko perfect kiya gaya hai (1ms/2ms se 5ms/30ms) taaki real ride miss na ho
     strategies: {
-        normal: { attempts: 6, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, tapMode: 'CENTER' },
-        medium: { attempts: 8, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, tapMode: 'GHOST' },
-        high_speed: { attempts: 12, attemptsSlow: 12, attempts_slow: 12, tapIntervalMs: 1, tap_interval_ms: 1, verifyDelayMs: 2, verify_delay_ms: 2, verifyDelaySlowMs: 5, verify_delay_slow_ms: 5, tapMode: 'GHOST' }
+        normal: { attempts: 10, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 30, verify_delay_ms: 30, tapMode: 'CENTER' },
+        medium: { attempts: 15, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 25, verify_delay_ms: 25, tapMode: 'GHOST' },
+        high_speed: { attempts: 15, attemptsSlow: 15, attempts_slow: 15, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 20, verify_delay_ms: 20, verifyDelaySlowMs: 40, verify_delay_slow_ms: 40, tapMode: 'GHOST' }
     },
     filters: {
         enabled: true,
@@ -694,8 +695,25 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         blockedAreas: [],
         required_keywords: [],
         requiredKeywords: [],
-        blocked_keywords: [],
-        blockedKeywords: []
+        // ✅ NEW: Screen texts to block (Namma Yatri Drawer, Rapido Missed Orders, etc.)
+        blocked_keywords: [
+            "close drawer", "earnings", "trips", "preferences", "plans", "benefits", 
+            "aarokya", "store", "help", "open data", "about", "google maps", 
+            "bottom sheet backdrop", "bottom sheet", "permissions required", 
+            "draw over other apps", "receive ride requests when the app is",
+            "1 order", "go to home", "orders missed", "you missed the order", 
+            "sorry, this order was accepted by another captain", 
+            "confirm your detected location", "confirm google map", "go to location"
+        ],
+        blockedKeywords: [
+            "close drawer", "earnings", "trips", "preferences", "plans", "benefits", 
+            "aarokya", "store", "help", "open data", "about", "google maps", 
+            "bottom sheet backdrop", "bottom sheet", "permissions required", 
+            "draw over other apps", "receive ride requests when the app is",
+            "1 order", "go to home", "orders missed", "you missed the order", 
+            "sorry, this order was accepted by another captain", 
+            "confirm your detected location", "confirm google map", "go to location"
+        ]
     }
 };
 
