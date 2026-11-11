@@ -181,12 +181,13 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-const APP_LATEST_VERSION = '1.19.6';
-const APP_MINIMUM_VERSION = '1.19.6'; // ✅ Force update ke liye minimum version v1.19.6
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.6/app-release.apk'; 
+// ✅ FIXED: Force update hataya gaya hai. Sabhi versions allowed hain.
+const APP_LATEST_VERSION = '1.19.8';
+const APP_MINIMUM_VERSION = '1.0.0'; // ✅ Ab koi bhi version chalega
+const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.8/app-release.apk'; 
 const APP_UPDATE_TITLE = 'New Update Available';
-const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.6) install karein.';
-const APP_RELEASE_NOTES = 'v1.19.6: Bug fixes, performance improvements, 24 Hours Free Trial for new users only, +3 Hours Referral Bonus, Smart Auto-Accept Fix, Time-based plans'; 
+const APP_UPDATE_MESSAGE = 'Driver Ride Picker ka naya version (v1.19.8) install karein.';
+const APP_RELEASE_NOTES = 'v1.19.8: Bug fixes, better performance, multi-version support.'; 
 
 const INSTALL_ID_MAX_LENGTH = 200;
 const REFERRAL_CODE_LENGTH = 8;
@@ -664,7 +665,6 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         bot_enabled: true,
         auto_accept_enabled: true
     },
-    // ✅ FIX: Speed ko perfect kiya gaya hai (1ms/2ms se 5ms/30ms) taaki real ride miss na ho
     strategies: {
         normal: { attempts: 10, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 30, verify_delay_ms: 30, tapMode: 'CENTER' },
         medium: { attempts: 15, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 25, verify_delay_ms: 25, tapMode: 'GHOST' },
@@ -695,7 +695,6 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         blockedAreas: [],
         required_keywords: [],
         requiredKeywords: [],
-        // ✅ NEW: Screen texts to block (Namma Yatri Drawer, Rapido Missed Orders, etc.)
         blocked_keywords: [
             "close drawer", "earnings", "trips", "preferences", "plans", "benefits", 
             "aarokya", "store", "help", "open data", "about", "google maps", 
@@ -1541,6 +1540,22 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
         
         const reason = String(req.body.reason || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 1000) || 'No detailed reason supplied.';
         const recommendedAction = String(req.body.recommendedAction || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 500) || 'Review the app compatibility and update remote config or APK as required.';
+        
+        // ✅ FIXED: Faltu ke UI_MISMATCH (Drawer, Bottom sheet, Location) block kiye gaye hain
+        if (issueType === 'UI_MISMATCH') {
+            const lowerReason = reason.toLowerCase();
+            const ignoreKeywords = [
+                "close drawer", "earnings", "preferences", "plans", "benefits", 
+                "aarokya", "open data", "permissions required", "draw over other apps",
+                "bottom sheet", "no root found", "detecting location", "google maps",
+                "logout", "help", "about", "store", "language: english"
+            ];
+            if (ignoreKeywords.some(kw => lowerReason.includes(kw))) {
+                // Ignore silently so it doesn't spam Telegram
+                return res.json({ success: true, accepted: false, message: 'Ignored known non-ride screen.' });
+            }
+        }
+
         const suppliedErrorId = String(req.body.errorId || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
         const errorId = suppliedErrorId || `DRP-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
 
@@ -2188,7 +2203,7 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
         const telemetryHourly = await db.collection('driverHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
         
-        // ✅ FIX: Immediate Events (Success/Failure alerts) ko bhi count karein
+        // ✅ FIXED: Immediate Events (Success/Failure alerts) ko bhi count karein
         const telemetryEvents = await db.collection('driverTelemetryEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
 
         let success = 0, failed = 0;
@@ -2198,9 +2213,15 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         const addData = (docs) => {
             docs.forEach(doc => {
                 const d = doc.data() || {};
-                success += Math.max(0, Number(d.successCount || 0));
-                failed += Math.max(0, Number(d.failCount || 0));
-                reportingDrivers.add(d.driverKey);
+                const suc = Math.max(0, Number(d.successCount || 0));
+                const fail = Math.max(0, Number(d.failCount || 0));
+                success += suc;
+                failed += fail;
+                
+                // ✅ FIXED: Sirf wahi driver count karo jisne actual ride (success/fail) report ki hai
+                if (suc > 0 || fail > 0) {
+                    reportingDrivers.add(d.driverKey);
+                }
 
                 if (d.failReasons) {
                     let rArr = Array.isArray(d.failReasons) ? d.failReasons : String(d.failReasons).split(', ');
@@ -2221,12 +2242,13 @@ app.get('/api/cron/half-hour-summary', async (req, res) => {
         telemetryEvents.forEach(doc => {
             const d = doc.data() || {};
             const type = String(d.type || '').toUpperCase();
-            reportingDrivers.add(d.driverKey);
 
             if (type === 'SUCCESS') {
                 success++;
+                reportingDrivers.add(d.driverKey);
             } else if (['FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'NO_RIDE_DETECTED_5MIN'].includes(type)) {
                 failed++;
+                reportingDrivers.add(d.driverKey);
                 reasonsMap[type] = (reasonsMap[type] || 0) + 1;
             }
         });
