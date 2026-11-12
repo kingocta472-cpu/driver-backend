@@ -18,7 +18,7 @@ const redis = new Redis({
 
 app.use(cors({
     origin: '*',
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Firebase-AppCheck']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Firebase-AppCheck', 'X-Tracker-Admin-Key']
 }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
 app.use(express.json({ limit: '1mb' }));
@@ -199,7 +199,11 @@ const TRIAL_IP_WINDOW_SECONDS = 86400;
 const FAKE_PHONE_PATTERNS = [ /^(\d)\1{9}$/, /^9999\d{6}$/, /^1234\d{6}$/, /^(\d{2})\1{4}$/, /^9876\d{6}$/, /^0000\d{6}$/ ];
 function isFakePhone(phone) { return FAKE_PHONE_PATTERNS.some(p => p.test(phone)); }
 
-const RIDE_BOT_CONFIG_VERSION_FALLBACK = Number(process.env.RIDE_BOT_CONFIG_VERSION || 3);
+const CONFIG_VERSION_FROM_ENV = Number(process.env.RIDE_BOT_CONFIG_VERSION || 3);
+const RIDE_BOT_CONFIG_VERSION_FALLBACK =
+    Number.isSafeInteger(CONFIG_VERSION_FROM_ENV) && CONFIG_VERSION_FROM_ENV > 0
+        ? CONFIG_VERSION_FROM_ENV
+        : 3;
 const RIDE_BOT_CONFIG_VERSION_KEY = 'ride-bot-config-version';
 
 async function getRideBotConfigVersion() {
@@ -444,11 +448,14 @@ function validateRemoteRideConfig(input) {
         if (typeof input.platforms !== 'object' || Array.isArray(input.platforms) || !input.platforms) throw new Error('platforms must be an object.');
         out.platforms = {};
         for (const [name, cfg] of Object.entries(input.platforms)) {
-            if (!['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'].includes(name)) throw new Error(`Unknown platform: ${name}`);
+            if (!['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide', 'Odisha Yatri'].includes(name)) throw new Error(`Unknown platform: ${name}`);
             if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error(`platforms.${name} must be an object.`);
             const p = {};
             for (const [key, value] of Object.entries(cfg)) {
-                if (key === 'enabled') p.enabled = Boolean(value);
+                if (key === 'enabled') {
+                    if (typeof value !== 'boolean') throw new Error(`${name}.enabled must be a boolean.`);
+                    p.enabled = value;
+                }
                 else if (key === 'package_names') {
                     const list = strList(value, `${name}.package_names`, 30);
                     for (const pkg of list) {
@@ -533,6 +540,11 @@ const BLOCKED_DRIVER_PACKAGE_IDS = new Set([
     'com.rapido.rider',
     'in.mobility.keralasavaariconsumer', 'com.mobility.movingtech', 'net.openkochi.yatri'
 ]);
+
+// Known driver packages must never be auto-assigned to a different platform.
+const KNOWN_DRIVER_PACKAGE_PLATFORM = Object.freeze({
+    'in.mobility.odishayatripartner': 'Odisha Yatri'
+});
 
 const DEFAULT_RIDE_BOT_CONFIG = {
     platforms: {
@@ -620,15 +632,34 @@ const DEFAULT_RIDE_BOT_CONFIG = {
                 "accepted the ride", "booking accepted", "order accepted"
             ],
             view_id_patterns: ["accept", "confirm"]
+        },
+        "Odisha Yatri": {
+            enabled: true,
+            package_names: ["in.mobility.odishayatripartner"],
+            accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Accept Request", "Accept Booking", "Confirm"],
+            success_signals: [
+                "start ride", "start trip", "begin trip", "trip started", "ride started",
+                "trip in progress", "on trip", "go to pickup", "going to pickup",
+                "navigate to pickup", "arrived at pickup", "reached pickup",
+                "waiting for rider", "waiting for customer", "waiting for passenger",
+                "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit",
+                "call rider", "call customer", "call passenger",
+                "chat with rider", "message rider", "chat with customer",
+                "you have accepted", "ride accepted", "trip accepted",
+                "accepted the ride", "booking accepted", "order accepted"
+            ],
+            view_id_patterns: ["accept", "confirm", "request", "booking"]
         }
     },
     global: {
         bot_enabled: true,
         auto_accept_enabled: true,
-        max_ride_cycle_duration_ms: 1000,
-        maxRideCycleDurationMs: 1000,
-        watchdog_interval_ms: 1000,
-        watchdogIntervalMs: 1000,
+        // Keep the accept cycle alive for slower/older devices.
+        // These values match the Android service's safe fallback timings.
+        max_ride_cycle_duration_ms: 8000,
+        maxRideCycleDurationMs: 8000,
+        watchdog_interval_ms: 2000,
+        watchdogIntervalMs: 2000,
         config_refresh_interval_ms: 300000,
         configRefreshIntervalMs: 300000,
         health_check_interval_ms: 300000,
@@ -700,6 +731,41 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         ]
     }
 };
+
+// Normalize only safety-critical runtime timings. This does not touch
+// account, plan, trial, referral, payment, or driver-specific filter data.
+function normalizeRideBotConfig(config) {
+    const normalized = JSON.parse(JSON.stringify(config || DEFAULT_RIDE_BOT_CONFIG));
+    if (!normalized.global || typeof normalized.global !== 'object' || Array.isArray(normalized.global)) {
+        normalized.global = {};
+    }
+    const globalConfig = normalized.global;
+
+    const configuredCycle = Number(
+        globalConfig.max_ride_cycle_duration_ms ??
+        globalConfig.maxRideCycleDurationMs ??
+        8000
+    );
+    const safeCycle = Number.isFinite(configuredCycle)
+        ? Math.min(30000, Math.max(8000, configuredCycle))
+        : 8000;
+
+    const configuredWatchdog = Number(
+        globalConfig.watchdog_interval_ms ??
+        globalConfig.watchdogIntervalMs ??
+        2000
+    );
+    const safeWatchdog = Number.isFinite(configuredWatchdog)
+        ? Math.min(15000, Math.max(500, configuredWatchdog))
+        : 2000;
+
+    globalConfig.max_ride_cycle_duration_ms = safeCycle;
+    globalConfig.maxRideCycleDurationMs = safeCycle;
+    globalConfig.watchdog_interval_ms = safeWatchdog;
+    globalConfig.watchdogIntervalMs = safeWatchdog;
+
+    return normalized;
+}
 
 async function decodeFirebaseToken(req) {
     const authorization = String(req.headers.authorization || '');
@@ -857,6 +923,7 @@ app.get('/api/config/ride-bot', async (req, res) => {
                 config = mergeConfigObjects(config, parsed);
             } catch (configError) { console.error('REMOTE RIDE CONFIG READ ERROR:', configError.message || configError); }
         }
+        config = normalizeRideBotConfig(config);
         const body = { version, updatedAt: new Date().toISOString(), ...config };
         rideConfigCache = { at: Date.now(), body };
         return res.status(200).json(body);
@@ -869,7 +936,9 @@ app.post('/api/admin/config/ride-bot', async (req, res) => {
         const clean = validateRemoteRideConfig(req.body?.config || req.body);
         const previousStored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
         const previous = previousStored ? (typeof previousStored === 'string' ? JSON.parse(previousStored) : previousStored) : {};
-        const merged = mergeConfigObjects(mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous), clean);
+        const merged = normalizeRideBotConfig(
+            mergeConfigObjects(mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous), clean)
+        );
         await redis.set(RIDE_BOT_CONFIG_DATA_KEY, JSON.stringify(merged));
         const previousVersion = await getRideBotConfigVersion();
         const newVersion = previousVersion + 1;
@@ -895,11 +964,15 @@ app.post('/api/admin/platform/package/add', async (req, res) => {
     try {
         const platformName = String(req.body?.platform || '').trim();
         const packageName = String(req.body?.packageName || '').trim();
-        const allowedPlatforms = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'];
+        const allowedPlatforms = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide', 'Odisha Yatri'];
         const packagePattern = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
-        if (!allowedPlatforms.includes(platformName)) return res.status(400).json({ success: false, message: 'Invalid platform. Use Uber, Ola, Rapido, Namma Yatri, or CityRide.' });
+        if (!allowedPlatforms.includes(platformName)) return res.status(400).json({ success: false, message: 'Invalid platform. Use Uber, Ola, Rapido, Namma Yatri, CityRide, or Odisha Yatri.' });
         if (!packagePattern.test(packageName) || packageName.length > 180) return res.status(400).json({ success: false, message: 'Invalid Android package name.' });
         if (BLOCKED_DRIVER_PACKAGE_IDS.has(packageName)) return res.status(400).json({ success: false, message: 'Passenger application package cannot be approved as a driver app.' });
+        const knownOwner = KNOWN_DRIVER_PACKAGE_PLATFORM[packageName];
+        if (knownOwner && knownOwner !== platformName) {
+            return res.status(400).json({ success: false, message: `This package is assigned to ${knownOwner}.` });
+        }
 
         const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
         const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
@@ -909,9 +982,10 @@ app.post('/api/admin/platform/package/add', async (req, res) => {
         const alreadyPresent = current.includes(packageName);
         platformConfig.package_names = [...new Set([...current, packageName])];
         merged.platforms = { ...merged.platforms, [platformName]: platformConfig };
+        const safeMerged = normalizeRideBotConfig(merged);
 
         if (!alreadyPresent) {
-            await redis.set(RIDE_BOT_CONFIG_DATA_KEY, JSON.stringify(merged));
+            await redis.set(RIDE_BOT_CONFIG_DATA_KEY, JSON.stringify(safeMerged));
             const previousVersion = await getRideBotConfigVersion();
             const newVersion = previousVersion + 1;
             await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(newVersion));
@@ -977,7 +1051,7 @@ app.get('/api/admin/dashboard', async (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ error: 'Unauthorized' });
     try {
         const today = new Date().toISOString().slice(0, 10); const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-        const platforms = ['Ola', 'Rapido', 'Uber', 'Namma Yatri']; const types = ['NO_RIDE_DETECTED_5MIN', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'CREDIT_FAILED'];
+        const platforms = ['Ola', 'Rapido', 'Uber', 'Namma Yatri', 'Odisha Yatri']; const types = ['NO_RIDE_DETECTED_5MIN', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'CREDIT_FAILED'];
         const stats = {};
         for (const platform of platforms) {
             stats[platform] = {};
@@ -1494,7 +1568,7 @@ app.post('/api/telemetry/alert', verifyFirebaseToken, async (req, res) => {
     try {
         const platform = String(req.body.platform || '').trim();
         const type = String(req.body.type || req.body.eventType || '').trim().toUpperCase();
-        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'UNKNOWN'];
+        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'ODISHA YATRI', 'UNKNOWN'];
         const allowedTypes = ['SUCCESS', 'FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'NO_RIDE_DETECTED_5MIN', 'CREDIT_FAILED', 'BOT_FAILURE', 'CUSTOM_ALERT'];
         if (!allowedPlatforms.includes(platform.toUpperCase()) || !allowedTypes.includes(type)) return res.status(400).json({ success: false, message: 'Unsupported telemetry alert.' });
         const phone = getAuthenticatedPhone(req);
@@ -1518,7 +1592,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
             return res.status(400).json({ success: false, message: 'Unsupported compatibility issue type.' });
         }
 
-        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'UNKNOWN'];
+        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'ODISHA YATRI', 'UNKNOWN'];
         const platform = String(req.body.platform || 'UNKNOWN').trim().toUpperCase().slice(0, 40);
         if (!allowedPlatforms.includes(platform)) {
             return res.status(400).json({ success: false, message: 'Unsupported platform.' });
@@ -1659,7 +1733,7 @@ app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) =
     }
 });
 
-const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide'];
+const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide', 'Odisha Yatri'];
 const PLAY_STORE_MONITOR_DEFAULTS = {
     Uber: {
         developerUrl: 'https://play.google.com/store/apps/dev?id=7908612043055486674',
@@ -1695,6 +1769,13 @@ const PLAY_STORE_MONITOR_DEFAULTS = {
         publisherAliases: ['INEVITABLEX STUDIOS', 'INEVITABLEX STUDIOS PRIVATE LIMITED'],
         titleGroups: [['cityride', 'pilot'], ['city', 'ride', 'pilot']],
         brandTokens: ['cityride', 'city ride']
+    },
+    'Odisha Yatri': {
+        developerUrl: 'https://play.google.com/store/apps/dev?id=9166297176297744140',
+        searchUrl: 'https://play.google.com/store/search?q=Odisha%20Yatri%20Driver%20Partner&c=apps',
+        publisherAliases: ['Moving Tech', 'MOVING TECH INNOVATIONS PRIVATE LIMITED'],
+        titleGroups: [['odisha', 'yatri', 'driver'], ['odisha', 'yatri', 'partner']],
+        brandTokens: ['odisha', 'yatri']
     }
 };
 
@@ -1839,7 +1920,12 @@ async function fetchGooglePlayHtml(url) {
     return html;
 }
 async function verifyPlayStoreCandidate(platformName, candidate, setting) {
-    if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(candidate?.packageName || '').trim())) {
+    const candidatePackage = String(candidate?.packageName || '').trim();
+    const knownOwner = KNOWN_DRIVER_PACKAGE_PLATFORM[candidatePackage];
+    if (knownOwner && knownOwner !== platformName) {
+        return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: `known_package_belongs_to_${knownOwner}` };
+    }
+    if (BLOCKED_DRIVER_PACKAGE_IDS.has(candidatePackage)) {
         return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: 'known_passenger_app_package' };
     }
     const packageName = String(candidate.packageName || '').trim();
@@ -1938,10 +2024,13 @@ async function getCurrentPlatformPackageNames(platformName) {
     return new Set(Array.isArray(values) ? values.map(value => String(value).trim()) : []);
 }
 async function addVerifiedPackageToRemoteConfig(platformName, packageName, verification) {
-    if (BLOCKED_DRIVER_PACKAGE_IDS.has(String(packageName || '').trim())) throw new Error('Passenger application package cannot be added to driver config.');
+    const normalizedPackage = String(packageName || '').trim();
+    if (BLOCKED_DRIVER_PACKAGE_IDS.has(normalizedPackage)) throw new Error('Passenger application package cannot be added to driver config.');
+    const knownOwner = KNOWN_DRIVER_PACKAGE_PLATFORM[normalizedPackage];
+    if (knownOwner && knownOwner !== platformName) throw new Error(`This package is assigned to ${knownOwner}.`);
     const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
     const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
-    const merged = mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous);
+    const merged = normalizeRideBotConfig(mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous));
     const platformConfig = { ...(merged.platforms?.[platformName] || {}) };
     const current = Array.isArray(platformConfig.package_names) ? platformConfig.package_names : [];
     if (current.includes(packageName)) return { added: false, version: await getRideBotConfigVersion() };
