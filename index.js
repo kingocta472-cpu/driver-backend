@@ -27,7 +27,7 @@ app.use(express.json({ limit: '1mb' }));
 // SPEED CACHES
 // ============================================================
 let rideConfigCache = { at: 0, body: null };
-const RIDE_CONFIG_CACHE_MS = 10000;
+const RIDE_CONFIG_CACHE_MS = 5 * 60 * 1000; // 5 min per warm server instance
 function clearRideConfigCache() { rideConfigCache = { at: 0, body: null }; }
 
 const userByUidCache = new Map();
@@ -353,27 +353,17 @@ async function verifyPayUTransaction(txnid, cfg) {
     return transaction;
 }
 async function sendTelegramMessage(message, replyMarkup = null) {
-    const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-    const chatId = String(process.env.TELEGRAM_CHAT_ID || '').trim();
-    if (!token || !chatId) return { sent: false, reason: 'Telegram is not configured.' };
-
-    const payload = { chat_id: chatId, text: message, disable_web_page_preview: true };
-    if (replyMarkup) payload.reply_markup = replyMarkup;
-
-    const response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.ok !== true) throw new Error(data.description || `Telegram HTTP ${response.status}`);
-    return { sent: true };
+    // TELEGRAM DISABLED: user requested no automated messages.
+    // Keep this function so existing non-critical callers remain backward-compatible.
+    return { sent: false, disabled: true, reason: 'Telegram notifications are disabled.' };
 }
 function maskedPhoneForMessage(phone) {
     const normalized = normalizePhone(phone);
     return normalized ? `${normalized.slice(0, 2)}******${normalized.slice(-2)}` : '**********';
 }
 async function notifyNewRegistrationIfNeeded(phone, isNewUser) {
-    if (!isNewUser) return;
+    // Telegram registration digest disabled; do not write queue documents.
+    return;
     try {
         const eventRef = getDB().collection('telegramEvents').doc(`registration_${hashPhoneForAuth(phone)}`);
         await eventRef.set({
@@ -813,7 +803,8 @@ async function verifyFirebaseToken(req, res, next) {
         req.firebaseUser = { uid: decoded.uid, phone: normalizePhone(userData.phone || userDoc.id), decodedToken: decoded, userData };
         req.driverUser = userData;
 
-        try { Promise.resolve(recordDriverActivity({ phone: req.firebaseUser.phone, uid: req.firebaseUser.uid, method: req.method, endpoint: req.originalUrl })).catch(trackerError => console.error('TRACKER ERROR:', trackerError)); } catch (trackerError) { console.error('TRACKER ERROR:', trackerError); }
+        // Driver activity writes disabled to reduce Firestore write load.
+        // Authentication and all protected business routes remain unchanged.
         next();
     } catch (error) {
         console.error('FIREBASE TOKEN ERROR:', error);
@@ -1531,206 +1522,16 @@ app.get('/api/payment/payu/status/:txnid', verifyFirebaseToken, async (req, res)
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to load PayU payment status.' }); }
 });
 
-app.post('/api/telemetry/summary', verifyFirebaseToken, async (req, res) => {
-    try {
-        const phone = normalizePhone(req.body.phone);
-        if (!phoneMatchesAuthenticatedUser(req, phone)) return res.status(403).json({ success: false, message: 'You can only submit telemetry for your own account.' });
-        let successCount = Number(req.body.successCount || 0);
-        let failCount = Number(req.body.failCount || 0);
-        if (req.body.totalRides !== undefined && req.body.successPercent !== undefined && req.body.failPercent !== undefined) {
-            const total = Number(req.body.totalRides);
-            const successPercent = Number(req.body.successPercent);
-            const failPercent = Number(req.body.failPercent);
-            if (!Number.isSafeInteger(total) || total < 0 || total > 100000 || !Number.isFinite(successPercent) || !Number.isFinite(failPercent) || successPercent < 0 || successPercent > 100 || failPercent < 0 || failPercent > 100) return res.status(400).json({ success: false, message: 'Invalid telemetry summary.' });
-            successCount = Math.round(total * successPercent / 100);
-            failCount = Math.max(0, total - successCount);
-        }
-        if (!Number.isSafeInteger(successCount) || successCount < 0 || successCount > 100000 || !Number.isSafeInteger(failCount) || failCount < 0 || failCount > 100000) return res.status(400).json({ success: false, message: 'Invalid telemetry counts.' });
-        const driverKey = hashPhoneForAuth(phone);
-        const reasons = Array.isArray(req.body.failReasons) ? req.body.failReasons.slice(0, 10).map(x => String(x).slice(0, 120)) : (typeof req.body.failReasons === 'string' && req.body.failReasons.trim() ? [req.body.failReasons.trim().slice(0, 1200)] : []);
-        const suppliedPeriodStart = Number(req.body.periodStartMs || 0);
-        if (Number.isSafeInteger(suppliedPeriodStart) && suppliedPeriodStart > 0 && suppliedPeriodStart <= Date.now() && Date.now() - suppliedPeriodStart <= 2 * 60 * 60 * 1000) {
-            const bucketStartMs = Math.floor(suppliedPeriodStart / (30 * 60 * 1000)) * (30 * 60 * 1000);
-            const halfHourKey = new Date(bucketStartMs).toISOString();
-            const reportRef = getDB().collection('driverHalfHourlyTelemetry').doc(`${driverKey}_${bucketStartMs}`);
-            await reportRef.set({ driverKey, halfHourKey, periodStartMs: bucketStartMs, successCount, failCount, failReasons: reasons, deviceInfo: String(req.body.deviceInfo || '').slice(0, 120), receivedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-            return res.json({ success: true, accepted: true, halfHourKey });
-        }
-        const hourStart = new Date(); hourStart.setUTCMinutes(0, 0, 0);
-        const hourKey = hourStart.toISOString();
-        const reportRef = getDB().collection('driverHourlyTelemetry').doc(`${driverKey}_${hourKey.replace(/[^0-9A-Za-z]/g, '')}`);
-        await reportRef.set({ driverKey, hourKey, successCount, failCount, failReasons: reasons, deviceInfo: String(req.body.deviceInfo || '').slice(0, 120), receivedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-        return res.json({ success: true, accepted: true, hourKey });
-    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to save telemetry summary.' }); }
+app.post('/api/telemetry/summary', (req, res) => {
+    return res.status(200).json({ success: true, accepted: false, disabled: true });
 });
 
-app.post('/api/telemetry/alert', verifyFirebaseToken, async (req, res) => {
-    try {
-        const platform = String(req.body.platform || '').trim();
-        const type = String(req.body.type || req.body.eventType || '').trim().toUpperCase();
-        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'ODISHA YATRI', 'UNKNOWN'];
-        const allowedTypes = ['SUCCESS', 'FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'NO_RIDE_DETECTED_5MIN', 'CREDIT_FAILED', 'BOT_FAILURE', 'CUSTOM_ALERT'];
-        if (!allowedPlatforms.includes(platform.toUpperCase()) || !allowedTypes.includes(type)) return res.status(400).json({ success: false, message: 'Unsupported telemetry alert.' });
-        const phone = getAuthenticatedPhone(req);
-        const suppliedEventId = String(req.body.eventId || '').trim().slice(0, 100);
-        const eventId = suppliedEventId || crypto.createHash('sha256').update(`${req.firebaseUser.uid}|${platform}|${type}|${Math.floor(Date.now() / 60000)}`).digest('hex');
-        const ref = getDB().collection('driverTelemetryEvents').doc(crypto.createHash('sha256').update(`${req.firebaseUser.uid}|${eventId}`).digest('hex'));
-        await getDB().runTransaction(async transaction => {
-            const existing = await transaction.get(ref);
-            if (existing.exists) return;
-            transaction.create(ref, { driverKey: hashPhoneForAuth(phone), platform: platform.slice(0, 30), type, eventId, createdAt: admin.firestore.FieldValue.serverTimestamp(), eventDay: new Date().toISOString().slice(0, 10) });
-        });
-        return res.json({ success: true, accepted: true });
-    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to record telemetry alert.' }); }
+app.post('/api/telemetry/alert', (req, res) => {
+    return res.status(200).json({ success: true, accepted: false, disabled: true });
 });
 
-app.post('/api/telemetry/compatibility', verifyFirebaseToken, async (req, res) => {
-    try {
-        const issueType = String(req.body.issueType || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 40);
-        const allowedIssueTypes = ['UNKNOWN_PACKAGE', 'UI_MISMATCH', 'BOT_FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'CONFIG_LOAD_FAILED', 'CUSTOM_ALERT'];
-        if (!allowedIssueTypes.includes(issueType)) {
-            return res.status(400).json({ success: false, message: 'Unsupported compatibility issue type.' });
-        }
-
-        const allowedPlatforms = ['UBER', 'OLA', 'RAPIDO', 'NAMMA YATRI', 'CITYRIDE', 'CITY RIDE', 'ODISHA YATRI', 'UNKNOWN'];
-        const platform = String(req.body.platform || 'UNKNOWN').trim().toUpperCase().slice(0, 40);
-        if (!allowedPlatforms.includes(platform)) {
-            return res.status(400).json({ success: false, message: 'Unsupported platform.' });
-        }
-
-        const packageName = String(req.body.packageName || '').trim().replace(/[^A-Za-z0-9._]/g, '').slice(0, 180) || 'unknown';
-        const appVersion = String(req.body.appVersion || '').trim().slice(0, 30) || 'unknown';
-        const deviceModel = String(req.body.deviceModel || '').trim().replace(/[\r\n]/g, ' ').slice(0, 100) || 'unknown';
-        const androidVersion = String(req.body.androidVersion || '').trim().slice(0, 30) || 'unknown';
-        const androidSdk = Number(req.body.androidSdk || 0);
-        const configVersion = Number(req.body.configVersion || 0);
-        
-        const reason = String(req.body.reason || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 1000) || 'No detailed reason supplied.';
-        const recommendedAction = String(req.body.recommendedAction || '').trim().replace(/[\r\n]+/g, ' ').slice(0, 500) || 'Review the app compatibility and update remote config or APK as required.';
-        
-        // Faltu ke UI_MISMATCH (Drawer, Bottom sheet, Location) block
-        if (issueType === 'UI_MISMATCH') {
-            const lowerReason = reason.toLowerCase();
-            const ignoreKeywords = [
-                "close drawer", "earnings", "preferences", "plans", "benefits", 
-                "aarokya", "open data", "permissions required", "draw over other apps",
-                "bottom sheet", "no root found", "detecting location", "google maps",
-                "logout", "help", "about", "store", "language: english"
-            ];
-            if (ignoreKeywords.some(kw => lowerReason.includes(kw))) {
-                return res.json({ success: true, accepted: false, message: 'Ignored known non-ride screen.' });
-            }
-        }
-
-        const suppliedErrorId = String(req.body.errorId || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
-        const errorId = suppliedErrorId || `DRP-${crypto.randomBytes(8).toString('hex').toUpperCase()}`;
-
-        let unknownPackageAutoApproval = null;
-        if (issueType === 'UNKNOWN_PACKAGE' && platform === 'UNKNOWN' && packageName !== 'unknown') {
-            try {
-                unknownPackageAutoApproval = await Promise.race([
-                    tryAutoApproveReportedUnknownPackage(packageName),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('verification timeout')), 4000))
-                ]);
-            } catch (verificationError) {
-                unknownPackageAutoApproval = { status: 'verification_failed', reason: String(verificationError.message || verificationError).slice(0, 160) };
-                console.error('UNKNOWN PACKAGE AUTO-VERIFICATION ERROR:', verificationError.message || verificationError);
-            }
-        }
-
-        const now = Date.now();
-        const windowBucket = Math.floor(now / (30 * 60 * 1000));
-        const deviceKey = crypto.createHash('sha256').update(`${deviceModel}|${appVersion}`).digest('hex').slice(0, 20);
-        const dedupeId = crypto.createHash('sha256')
-            .update(`${packageName}|${issueType}|${deviceKey}|${windowBucket}`)
-            .digest('hex');
-        const reportRef = getDB().collection('compatibilityReports').doc(dedupeId);
-        
-        let shouldSendTelegram = false;
-
-        await getDB().runTransaction(async transaction => {
-            const snapshot = await transaction.get(reportRef);
-            if (!snapshot.exists) {
-                transaction.create(reportRef, {
-                    issueId: errorId,
-                    issueType,
-                    platform,
-                    packageName,
-                    appVersion,
-                    deviceModel,
-                    androidVersion,
-                    androidSdk: Number.isFinite(androidSdk) ? androidSdk : 0,
-                    configVersion: Number.isFinite(configVersion) ? configVersion : 0,
-                    reason,
-                    recommendedAction,
-                    driverKey: hashPhoneForAuth(getAuthenticatedPhone(req)),
-                    reportedCount: 1,
-                    telegramStatus: shouldSendTelegram ? 'sending' : 'queued_for_digest',
-                    telegramLeaseUntilMs: shouldSendTelegram ? now + 90000 : 0,
-                    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-                    lastReportedAt: admin.firestore.FieldValue.serverTimestamp()
-                });
-                return;
-            }
-
-            const data = snapshot.data() || {};
-            transaction.update(reportRef, {
-                reportedCount: Number(data.reportedCount || 0) + 1,
-                lastReportedAt: admin.firestore.FieldValue.serverTimestamp(),
-                ...(shouldSendTelegram ? { telegramStatus: 'sending', telegramLeaseUntilMs: now + 90000 } : {})
-            });
-        });
-
-        if (shouldSendTelegram) {
-            const message = [
-                '🚨 DRIVER RIDE PICKER — INSTANT COMPATIBILITY ALERT',
-                `Issue ID: ${errorId}`,
-                `Issue: ${issueType}`,
-                `Platform: ${platform}`,
-                `Package: ${packageName}`,
-                `APK version: ${appVersion}`,
-                `Device: ${deviceModel}`,
-                `Android: ${androidVersion} (SDK ${Number.isFinite(androidSdk) ? androidSdk : 0})`,
-                `Remote config version: ${Number.isFinite(configVersion) ? configVersion : 0}`,
-                `Exact reason: ${reason}`,
-                `Required action: ${recommendedAction}`,
-                ...(issueType === 'UNKNOWN_PACKAGE' ? [
-                    'PACKAGE AUTO-RECOVERY RESULT:',
-                    unknownPackageAutoApproval?.status === 'auto_approved' || unknownPackageAutoApproval?.status === 'already_present'
-                        ? `Verified on Google Play and ${unknownPackageAutoApproval.status === 'auto_approved' ? 'added automatically' : 'already present'}: ${unknownPackageAutoApproval.platform || ''} / ${packageName} / config v${unknownPackageAutoApproval.configVersion || ''}`
-                        : `Not auto-approved: ${unknownPackageAutoApproval?.status || 'manual_review_required'}. No unverified package was added.`,
-                    ...(unknownPackageAutoApproval?.status === 'auto_approved' || unknownPackageAutoApproval?.status === 'already_present' ? [] : [
-                        'After manual verification, call POST /api/admin/platform/package/add',
-                        `JSON body: {\"platform\":\"<Uber|Ola|Rapido|Namma Yatri|CityRide>\",\"packageName\":\"${packageName}\"}`,
-                        'Authorization: Bearer <ADMIN_TOKEN> (keep token private).'
-                    ])
-                ] : []),
-                `Time: ${new Date().toISOString()}`
-            ].join('\n');
-
-            try {
-                const result = await sendTelegramMessage(message);
-                if (!result.sent) throw new Error(result.reason || 'Telegram is not configured.');
-                await reportRef.set({
-                    telegramStatus: 'sent',
-                    telegramSentAt: admin.firestore.FieldValue.serverTimestamp(),
-                    telegramLeaseUntilMs: 0
-                }, { merge: true });
-            } catch (telegramError) {
-                await reportRef.set({
-                    telegramStatus: 'pending',
-                    telegramLeaseUntilMs: 0,
-                    telegramLastError: String(telegramError.message || telegramError).slice(0, 200)
-                }, { merge: true });
-                console.error('COMPATIBILITY TELEGRAM ERROR:', telegramError.message || telegramError);
-            }
-        }
-
-        return res.json({ success: true, accepted: true, errorId, telegramAttempted: shouldSendTelegram });
-    } catch (error) {
-        console.error('COMPATIBILITY REPORT ERROR:', error.message || error);
-        return res.status(500).json({ success: false, message: 'Unable to record compatibility report.' });
-    }
+app.post('/api/telemetry/compatibility', (req, res) => {
+    return res.status(200).json({ success: true, accepted: false, disabled: true });
 });
 
 const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide', 'Odisha Yatri'];
@@ -2201,219 +2002,18 @@ app.post('/api/admin/play-store-package-discovery/run', async (req, res) => {
     catch (error) { return res.status(500).json({ success: false, message: 'Play Store package discovery failed.' }); }
 });
 
-app.get('/api/cron/hourly-summary', async (req, res) => {
-    const expected = String(process.env.CRON_SECRET || '');
-    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!expected || !supplied || !safeEqualHex(sha512(expected), sha512(supplied))) return res.status(401).json({ success: false, message: 'Unauthorized cron request.' });
-    try {
-        const db = getDB();
-        const now = new Date(); now.setUTCMinutes(0, 0, 0);
-        const processed = [];
-        for (let offset = 1; offset <= 3; offset++) {
-            const bucket = new Date(now.getTime() - offset * 60 * 60 * 1000);
-            const hourKey = bucket.toISOString();
-            const reportsSnapshot = await db.collection('driverHourlyTelemetry').where('hourKey', '==', hourKey).get();
-            if (reportsSnapshot.empty) continue;
-            const runRef = db.collection('hourlySummaryRuns').doc(hourKey.replace(/[^0-9A-Za-z]/g, ''));
-            let claimed = false;
-            await db.runTransaction(async transaction => {
-                const runSnapshot = await transaction.get(runRef);
-                const data = runSnapshot.exists ? (runSnapshot.data() || {}) : {};
-                if (data.status === 'sent' || Number(data.leaseUntilMs || 0) > Date.now()) return;
-                transaction.set(runRef, { status: 'sending', hourKey, leaseUntilMs: Date.now() + 120000, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-                claimed = true;
-            });
-            if (!claimed) continue;
-            let success = 0, failed = 0;
-            reportsSnapshot.forEach(doc => { const data = doc.data() || {}; success += Math.max(0, Number(data.successCount || 0)); failed += Math.max(0, Number(data.failCount || 0)); });
-            const totalRides = success + failed;
-            const successPct = totalRides ? (success * 100 / totalRides) : 0;
-            const failPct = totalRides ? (failed * 100 / totalRides) : 0;
-            const totalUsers = await db.collection('users').count().get();
-            const activeCutoff = admin.firestore.Timestamp.fromMillis(Date.now() - 5 * 60 * 1000);
-            const activeUsers = await db.collection(TRACKER_COLLECTION).where('lastSeenAt', '>=', activeCutoff).count().get();
-            const message = [
-                '📊 Driver Ride Picker — Hourly Report',
-                `Window (UTC): ${hourKey} - ${new Date(bucket.getTime() + 3600000).toISOString()}`,
-                `Total registered drivers: ${Number(totalUsers.data().count || 0)}`,
-                `Active drivers now (last 5 min): ${Number(activeUsers.data().count || 0)}`,
-                `Drivers reporting this hour: ${reportsSnapshot.size}`,
-                `Total ride outcomes: ${totalRides}`,
-                `Successful: ${success} (${successPct.toFixed(1)}%)`,
-                `Failed: ${failed} (${failPct.toFixed(1)}%)`,
-                'Cancelled: Not reported separately by current APK'
-            ].join('\n');
-            try {
-                const telegramResult = await sendTelegramMessage(message);
-                if (!telegramResult.sent) throw new Error(telegramResult.reason || 'Telegram is not configured.');
-                await runRef.set({ status: 'sent', sentAt: admin.firestore.FieldValue.serverTimestamp(), leaseUntilMs: 0, successCount: success, failCount: failed }, { merge: true });
-                processed.push({ hourKey, sent: true, totalRides });
-            } catch (telegramError) {
-                await runRef.set({ status: 'pending', leaseUntilMs: 0, lastError: String(telegramError.message || telegramError).slice(0, 200) }, { merge: true });
-                processed.push({ hourKey, sent: false, error: String(telegramError.message || telegramError).slice(0, 120) });
-            }
-        }
-        return res.json({ success: true, processed });
-    } catch (error) { console.error('HOURLY SUMMARY CRON ERROR:', error); return res.status(500).json({ success: false, message: 'Unable to generate hourly summary.' }); }
+app.get('/api/cron/hourly-summary', (req, res) => {
+    return res.status(200).json({ success: true, disabled: true, message: 'Automated reports are disabled.' });
 });
 
 
-app.get('/api/cron/half-hour-summary', async (req, res) => {
-    const expected = String(process.env.CRON_SECRET || '');
-    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!expected || !supplied || !safeEqualHex(sha512(expected), sha512(supplied))) return res.status(401).json({ success: false, message: 'Unauthorized cron request.' });
-    try {
-        const db = getDB();
-        const nowMs = Date.now();
-        const bucketStartMs = Math.floor(nowMs / 1800000) * 1800000 - 1800000;
-        const halfHourKey = new Date(bucketStartMs).toISOString();
-        const startTs = admin.firestore.Timestamp.fromMillis(bucketStartMs);
-        const endTs = admin.firestore.Timestamp.fromMillis(bucketStartMs + 1800000);
-
-        const runRef = db.collection('halfHourlySummaryRuns').doc(String(bucketStartMs));
-        let claimed = false;
-        await db.runTransaction(async tx => {
-            const snap = await tx.get(runRef);
-            const data = snap.exists ? (snap.data() || {}) : {};
-            if (data.status === 'sent' || Number(data.leaseUntilMs || 0) > nowMs) return;
-            tx.set(runRef, { status: 'sending', halfHourKey, leaseUntilMs: nowMs + 120000, updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
-            claimed = true;
-        });
-        if (!claimed) return res.json({ success: true, skipped: true, halfHourKey });
-
-        const telemetryHalfHourly = await db.collection('driverHalfHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
-        const telemetryHourly = await db.collection('driverHourlyTelemetry').where('receivedAt', '>=', startTs).where('receivedAt', '<', endTs).get();
-        
-        // Immediate Events (Success/Failure alerts) ko bhi count karein
-        const telemetryEvents = await db.collection('driverTelemetryEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
-
-        let success = 0, failed = 0;
-        let reasonsMap = {};
-        let reportingDrivers = new Set();
-
-        const addData = (docs) => {
-            docs.forEach(doc => {
-                const d = doc.data() || {};
-                const suc = Math.max(0, Number(d.successCount || 0));
-                const fail = Math.max(0, Number(d.failCount || 0));
-                success += suc;
-                failed += fail;
-                
-                if (suc > 0 || fail > 0) {
-                    reportingDrivers.add(d.driverKey);
-                }
-
-                if (d.failReasons) {
-                    let rArr = Array.isArray(d.failReasons) ? d.failReasons : String(d.failReasons).split(', ');
-                    rArr.forEach(r => {
-                        if (r && r !== 'None') {
-                            let key = r.split(':')[0].trim();
-                            reasonsMap[key] = (reasonsMap[key] || 0) + 1;
-                        }
-                    });
-                }
-            });
-        };
-
-        addData(telemetryHalfHourly.docs);
-        addData(telemetryHourly.docs);
-
-        telemetryEvents.forEach(doc => {
-            const d = doc.data() || {};
-            const type = String(d.type || '').toUpperCase();
-
-            if (type === 'SUCCESS') {
-                success++;
-                reportingDrivers.add(d.driverKey);
-            } else if (['FAILURE', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'NO_RIDE_DETECTED_5MIN'].includes(type)) {
-                failed++;
-                reportingDrivers.add(d.driverKey);
-                reasonsMap[type] = (reasonsMap[type] || 0) + 1;
-            }
-        });
-
-        const totalRides = success + failed;
-        const successPct = totalRides ? success * 100 / totalRides : 0;
-        const failPct = totalRides ? failed * 100 / totalRides : 0;
-
-        const usersSnap = await db.collection('users').count().get();
-        const totalDrivers = Math.max(0, Number(usersSnap.data().count || 0));
-        const cutoff = admin.firestore.Timestamp.fromMillis(nowMs - 5 * 60 * 1000);
-        const onlineSnap = await db.collection(TRACKER_COLLECTION).where('lastSeenAt', '>=', cutoff).count().get();
-        const online = Math.min(totalDrivers, Math.max(0, Number(onlineSnap.data().count || 0)));
-        const offline = Math.max(0, totalDrivers - online);
-
-        const issues = await db.collection('compatibilityReports').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
-        const issueCounts = {};
-        const uiMismatchDetails = [];
-        
-        issues.forEach(doc => {
-            const d = doc.data() || {};
-            const k = String(d.issueType || 'OTHER');
-            issueCounts[k] = (issueCounts[k] || 0) + Math.max(1, Number(d.reportedCount || 1));
-            
-            if (k === 'UI_MISMATCH' && d.reason) {
-                let reasonText = d.reason;
-                const screenTextIdx = reasonText.indexOf('SCREEN TEXT:');
-                if (screenTextIdx !== -1) {
-                    reasonText = reasonText.substring(screenTextIdx, screenTextIdx + 150);
-                } else {
-                    reasonText = reasonText.substring(0, 150);
-                }
-                uiMismatchDetails.push(`- ${d.platform}: ${reasonText}...`);
-            }
-        });
-        
-        const issueText = Object.entries(issueCounts).map(([k,v]) => `${k}: ${v}`).join(', ') || 'None';
-        const issueDetailsText = uiMismatchDetails.length > 0 ? `\n\n🔍 UI Mismatch Details (Fix via Backend Config):\n${uiMismatchDetails.slice(0, 3).join('\n')}` : '';
-
-        const registrationWindow = await db.collection('telegramEvents').where('createdAt', '>=', startTs).where('createdAt', '<', endTs).get();
-        const newRegistrationCount = registrationWindow.docs.filter(doc => String((doc.data() || {}).type || '') === 'new_registration').length;
-
-        const reasonsText = Object.entries(reasonsMap).map(([k,v]) => `  • ${k}: ${v}`).join('\n') || '  • None';
-
-        const message = [
-            '📊 DRIVER RIDE PICKER — 30 MINUTE REPORT',
-            `Window (UTC): ${halfHourKey} — ${new Date(bucketStartMs + 1800000).toISOString()}`,
-            '',
-            '👥 DRIVER STATUS',
-            `Total registered: ${totalDrivers}`,
-            `🟢 Online (activity in last 5 min): ${online}`,
-            `🔴 Offline / not recently active: ${offline}`,
-            `🆕 New registrations in this window: ${newRegistrationCount}`,
-            '',
-            '🚕 RIDE PERFORMANCE',
-            `Drivers reporting: ${reportingDrivers.size}`,
-            `Total recorded outcomes: ${totalRides}`,
-            `✅ Successful: ${success} (${successPct.toFixed(1)}%)`,
-            `❌ Failed: ${failed} (${failPct.toFixed(1)}%)`,
-            '',
-            '⚠️ FAILURE REASONS (Why rides missed):',
-            reasonsText,
-            '',
-            `🔧 Compatibility issues: ${issueText}${issueDetailsText}`,
-            'Note: Data is a mix of Hourly, 30-Min and Instant Events.'
-        ].join('\n');
-
-        try {
-            const sent = await sendTelegramMessage(message);
-            if (!sent.sent) throw new Error(sent.reason || 'Telegram is not configured.');
-            await runRef.set({ status: 'sent', sentAt: admin.firestore.FieldValue.serverTimestamp(), leaseUntilMs: 0, successCount: success, failCount: failed, totalDrivers, onlineDrivers: online, offlineDrivers: offline, issueCounts }, { merge: true });
-            return res.json({ success: true, sent: true, halfHourKey, totalRides, totalDrivers, online, offline });
-        } catch (e) {
-            await runRef.set({ status: 'pending', leaseUntilMs: 0, lastError: String(e.message || e).slice(0, 200) }, { merge: true });
-            return res.status(502).json({ success: false, message: 'Telegram digest failed and can be retried.' });
-        }
-    } catch (error) {
-        console.error('HALF-HOUR SUMMARY ERROR:', error);
-        return res.status(500).json({ success: false, message: 'Unable to generate half-hour report.' });
-    }
+app.get('/api/cron/half-hour-summary', (req, res) => {
+    return res.status(200).json({ success: true, disabled: true, message: 'Automated reports are disabled.' });
 });
 
-app.post('/api/admin/telegram/test', async (req, res) => {
+app.post('/api/admin/telegram/test', (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
-    try { const result = await sendTelegramMessage('✅ Driver Ride Picker Telegram connection test.'); return res.json({ success: true, ...result }); }
-    catch (error) { return res.status(502).json({ success: false, message: error.message || 'Telegram test failed.' }); }
+    return res.status(200).json({ success: true, sent: false, disabled: true });
 });
 
 app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
