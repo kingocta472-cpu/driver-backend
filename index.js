@@ -34,116 +34,6 @@ const userByUidCache = new Map();
 const USER_CACHE_MS = 60000;
 
 // ============================================================
-// DRIVER ACTIVITY TRACKER - INLINE
-// ============================================================
-const TRACKER_COLLECTION = 'driverActivity';
-const TRACKER_WRITE_INTERVAL_MS = 5 * 60 * 1000;
-
-let trackerCache = global.driverRidePickerTrackerCache;
-if (!trackerCache) {
-    trackerCache = global.driverRidePickerTrackerCache = { lastWriteByDriver: new Map() };
-}
-
-function trackerHashPhone(phone) { return crypto.createHash('sha256').update(`driver-ride-picker-tracker:${phone}`).digest('hex'); }
-function trackerMaskPhone(phone) {
-    const normalized = normalizePhone(phone);
-    if (!normalized) return '**********';
-    return normalized.slice(0, 2) + '******' + normalized.slice(-2);
-}
-function trackerShouldWrite(driverKey) {
-    const now = Date.now();
-    const lastWrite = trackerCache.lastWriteByDriver.get(driverKey) || 0;
-    if (now - lastWrite < TRACKER_WRITE_INTERVAL_MS) return false;
-    trackerCache.lastWriteByDriver.set(driverKey, now);
-    if (trackerCache.lastWriteByDriver.size > 5000) {
-        const cutoff = now - TRACKER_WRITE_INTERVAL_MS * 2;
-        for (const [key, timestamp] of trackerCache.lastWriteByDriver) {
-            if (timestamp < cutoff) trackerCache.lastWriteByDriver.delete(key);
-        }
-    }
-    return true;
-}
-async function recordDriverActivity({ phone, uid, method, endpoint }) {
-    const normalizedPhone = normalizePhone(phone);
-    if (!normalizedPhone) return;
-    const driverKey = trackerHashPhone(normalizedPhone);
-    if (!trackerShouldWrite(driverKey)) return;
-    try {
-        const db = getDB();
-        await db.collection(TRACKER_COLLECTION).doc(driverKey).set({
-            driverId: driverKey,
-            phoneMasked: trackerMaskPhone(normalizedPhone),
-            firebaseUid: String(uid || ''),
-            lastSeenAt: admin.firestore.FieldValue.serverTimestamp(),
-            lastMethod: String(method || '').slice(0, 20),
-            lastEndpoint: String(endpoint || '').slice(0, 200),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-    } catch (error) { console.error('DRIVER ACTIVITY TRACKER WRITE ERROR:', error); }
-}
-function verifyTrackerAdminKey(req) {
-    const configuredKey = String(process.env.TRACKER_ADMIN_KEY || '');
-    const suppliedKey = String(req.headers['x-tracker-admin-key'] || '');
-    if (!configuredKey || !suppliedKey) return false;
-    const expected = Buffer.from(configuredKey, 'utf8');
-    const supplied = Buffer.from(suppliedKey, 'utf8');
-    if (expected.length !== supplied.length) return false;
-    return crypto.timingSafeEqual(expected, supplied);
-}
-function getTrackerStatus(lastSeenMs) {
-    const age = Date.now() - lastSeenMs;
-    if (age <= 5 * 60 * 1000) return 'active';
-    if (age <= 15 * 60 * 1000) return 'recent';
-    return 'inactive';
-}
-function trackerTimestampToIso(timestamp) {
-    if (!timestamp) return null;
-    if (typeof timestamp.toDate === 'function') return timestamp.toDate().toISOString();
-    return null;
-}
-async function getDriverTrackerSnapshot() {
-    const db = getDB();
-    const now = Date.now();
-    const activeCutoff = now - 5 * 60 * 1000;
-    const recentCutoff = now - 15 * 60 * 1000;
-    const today = new Date(); today.setHours(0, 0, 0, 0);
-
-    const usersSnapshot = await db.collection('users').count().get();
-    const activitySnapshot = await db.collection(TRACKER_COLLECTION).orderBy('lastSeenAt', 'desc').limit(200).get();
-    let activeNow = 0, active15Min = 0, activeToday = 0;
-    const drivers = [];
-
-    activitySnapshot.forEach(doc => {
-        const data = doc.data() || {};
-        const lastSeen = data.lastSeenAt;
-        const lastSeenMs = lastSeen && typeof lastSeen.toMillis === 'function' ? lastSeen.toMillis() : 0;
-        const status = lastSeenMs ? getTrackerStatus(lastSeenMs) : 'inactive';
-        if (lastSeenMs >= activeCutoff) activeNow++;
-        if (lastSeenMs >= recentCutoff) active15Min++;
-        if (lastSeenMs >= today.getTime()) activeToday++;
-        drivers.push({
-            driverId: String(data.driverId || doc.id),
-            phone: String(data.phoneMasked || '**********'),
-            status: status,
-            lastSeenAt: trackerTimestampToIso(lastSeen),
-            method: String(data.lastMethod || ''),
-            endpoint: String(data.lastEndpoint || '')
-        });
-    });
-
-    return {
-        success: true, generatedAt: new Date().toISOString(),
-        summary: { totalDrivers: Number(usersSnapshot.data().count || 0), activeNow, active15Min, activeToday },
-        drivers: drivers
-    };
-}
-async function handleDriverTrackerAdmin(req, res) {
-    if (!verifyTrackerAdminKey(req)) return res.status(401).json({ success: false, message: 'Unauthorized tracker access.' });
-    try { return res.json(await getDriverTrackerSnapshot()); }
-    catch (error) { return res.status(500).json({ success: false, message: 'Unable to load driver activity tracker.' }); }
-}
-
-// ============================================================
 // CONFIG ✅ TIME BASED SYSTEM
 // ============================================================
 const TRIAL_DURATION_MS = 24 * 60 * 60 * 1000;
@@ -351,30 +241,6 @@ async function verifyPayUTransaction(txnid, cfg) {
     const transaction = result?.transaction_details?.[txnid];
     if (!transaction) throw new Error('PayU did not return transaction details.');
     return transaction;
-}
-async function sendTelegramMessage(message, replyMarkup = null) {
-    // TELEGRAM DISABLED: user requested no automated messages.
-    // Keep this function so existing non-critical callers remain backward-compatible.
-    return { sent: false, disabled: true, reason: 'Telegram notifications are disabled.' };
-}
-function maskedPhoneForMessage(phone) {
-    const normalized = normalizePhone(phone);
-    return normalized ? `${normalized.slice(0, 2)}******${normalized.slice(-2)}` : '**********';
-}
-async function notifyNewRegistrationIfNeeded(phone, isNewUser) {
-    // Telegram registration digest disabled; do not write queue documents.
-    return;
-    try {
-        const eventRef = getDB().collection('telegramEvents').doc(`registration_${hashPhoneForAuth(phone)}`);
-        await eventRef.set({
-            type: 'new_registration',
-            phoneHash: hashPhoneForAuth(phone),
-            status: 'queued_for_digest',
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-    } catch (error) {
-        console.error('REGISTRATION DIGEST QUEUE ERROR:', error.message || error);
-    }
 }
 
 // ============================================================
@@ -1017,49 +883,20 @@ app.post('/api/admin/config/set', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to set config version.' }); }
 });
 
-app.post('/api/health/report', verifyAppCheck, async (req, res) => {
-    try {
-        const type = String(req.body?.type || 'UNKNOWN').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 50) || 'UNKNOWN';
-        const platform = String(req.body?.platform || 'UNKNOWN').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').slice(0, 40) || 'UNKNOWN';
-        const appVersion = String(req.body?.appVersion || '').trim().slice(0, 30);
-        const deviceModel = String(req.body?.deviceModel || '').trim().slice(0, 80);
-        const androidVersion = String(req.body?.androidVersion || '').trim().slice(0, 30);
-        const timestamp = String(req.body?.timestamp || '').slice(0, 40);
-        const reportId = `report:${Date.now()}:${crypto.randomBytes(8).toString('hex')}`;
-        const today = new Date().toISOString().slice(0, 10);
-        const report = { type, platform, appVersion, deviceModel, androidVersion, timestamp, receivedAt: new Date().toISOString() };
-        await redis.setex(reportId, 7 * 24 * 60 * 60, JSON.stringify(report));
-        await redis.incr(`counter:${platform}:${type}:${today}`);
-        await redis.incr(`counter:total:${today}`);
-        return res.status(200).json({ success: true, reportId });
-    } catch (error) {
-        console.error('HEALTH REPORT ERROR:', error.message || error);
-        return res.status(500).json({ success: false, error: 'Failed to save report' });
-    }
+app.post('/api/health/report', (req, res) => {
+    // Optional diagnostics disabled to reduce Redis writes.
+    // Keep a fast 200 response for installed APK compatibility.
+    return res.status(200).json({ success: true, accepted: false, disabled: true });
 });
 
-app.get('/api/admin/dashboard', async (req, res) => {
+app.get('/api/admin/dashboard', (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ error: 'Unauthorized' });
-    try {
-        const today = new Date().toISOString().slice(0, 10); const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-        const platforms = ['Ola', 'Rapido', 'Uber', 'Namma Yatri', 'Odisha Yatri']; const types = ['NO_RIDE_DETECTED_5MIN', 'ACCEPT_FAILED', 'SUCCESS_TIMEOUT', 'CREDIT_FAILED'];
-        const stats = {};
-        for (const platform of platforms) {
-            stats[platform] = {};
-            for (const type of types) {
-                const todayCount = parseInt(await redis.get(`counter:${platform}:${type}:${today}`) || 0);
-                const yesterdayCount = parseInt(await redis.get(`counter:${platform}:${type}:${yesterday}`) || 0);
-                stats[platform][type] = { today: todayCount, yesterday: yesterdayCount, change: todayCount - yesterdayCount };
-            }
-        }
-        const totalToday = parseInt(await redis.get(`counter:total:${today}`) || 0); const totalYesterday = parseInt(await redis.get(`counter:total:${yesterday}`) || 0);
-        let totalErrors = 0; for (const p of Object.keys(stats)) { for (const t of Object.keys(stats[p])) totalErrors += stats[p][t].today; }
-        const healthScore = Math.max(0, 100 - Math.floor(totalErrors / 100));
-        return res.status(200).json({ date: today, totalReports: totalToday, yesterdayReports: totalYesterday, healthScore, platforms: stats, alert: healthScore < 90 ? "Platform issue detected" : "All systems normal" });
-    } catch (error) { return res.status(500).json({ error: 'Dashboard failed' }); }
+    return res.status(200).json({ success: true, disabled: true, message: 'Telemetry dashboard is disabled.' });
 });
 
-app.get('/api/admin/tracker', async (req, res) => { return handleDriverTrackerAdmin(req, res); });
+app.get('/api/admin/tracker', (req, res) => {
+    return res.status(200).json({ success: true, disabled: true, message: 'Driver activity tracking is disabled.' });
+});
 app.get('/api/test', (req, res) => { res.json({ success: true, message: 'Android app successfully connected to Firebase backend!', timestamp: new Date().toISOString() }); });
 
 app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
@@ -1254,7 +1091,6 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
             welcomeMessage = pinWasCreated ? 'PIN created successfully. Welcome back!' : 'Welcome back!';
         }
 
-        await notifyNewRegistrationIfNeeded(phone, isNewUser);
 
         userByUidCache.delete(driverFirebaseUid);
 
@@ -1280,12 +1116,9 @@ app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
         if (!snapshot.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
         const data = snapshot.data() || {};
 
-        let referralCount = 0;
-        try {
-            const referralCountSnapshot = await getDB().collection('referralRewards').where('referrerPhone', '==', phone).where('status', '==', 'rewarded').count().get();
-            referralCount = Number(referralCountSnapshot.data().count || 0);
-        } catch (_) { referralCount = Number(data.referralCount || 0); }
-
+        // Referral count is not required for plan validation. Avoid an extra
+        // Firestore aggregate query on every balance/plan check.
+        const referralCount = Number(data.referralCount || 0);
         const planExpiry = Number(data.planExpiry || 0);
         const activePlan = getActivePlanType(data);
         const isUnlimited = planExpiry > Date.now();
@@ -1337,10 +1170,7 @@ app.post('/api/ride/deduct-credit', verifyFirebaseToken, async (req, res) => {
                 return res.status(402).json({ success: false, message: 'Plan expired. Please recharge to continue.' });
             }
         }
-        getDB().collection('users').doc(phone).update({
-            totalRides: admin.firestore.FieldValue.increment(1),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        }).catch(e => console.error('RIDE COUNT ERROR:', e.message || e));
+        // Time-based plan validation only. No per-ride Firestore counter write.
         const activePlanType = getActivePlanType(userData);
         return res.json({ success: true, alreadyProcessed: false, ridesDeducted: 0, unlimited: true, planType: activePlanType, message: `Unlimited ${activePlanType} plan active. No deduction.` });
     } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to process ride.' }); }
@@ -1534,472 +1364,12 @@ app.post('/api/telemetry/compatibility', (req, res) => {
     return res.status(200).json({ success: true, accepted: false, disabled: true });
 });
 
-const PLAY_STORE_PLATFORMS = ['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'CityRide', 'Odisha Yatri'];
-const PLAY_STORE_MONITOR_DEFAULTS = {
-    Uber: {
-        developerUrl: 'https://play.google.com/store/apps/dev?id=7908612043055486674',
-        searchUrl: 'https://play.google.com/store/search?q=Uber%20Driver&c=apps',
-        publisherAliases: ['Uber Technologies, Inc.'],
-        titleGroups: [['uber', 'driver']],
-        brandTokens: ['uber']
-    },
-    Ola: {
-        developerUrl: 'https://play.google.com/store/apps/developer?id=Ola+%28ANI+TECHNOLOGIES+PRIVATE+LIMITED%29',
-        searchUrl: 'https://play.google.com/store/search?q=Ola%20Driver&c=apps',
-        publisherAliases: ['Ola (ANI TECHNOLOGIES PRIVATE LIMITED)', 'ANI TECHNOLOGIES PRIVATE LIMITED'],
-        titleGroups: [['ola', 'driver']],
-        brandTokens: ['ola']
-    },
-    Rapido: {
-        developerUrl: 'https://play.google.com/store/apps/developer?id=Rapido+Bike+Taxi',
-        searchUrl: 'https://play.google.com/store/search?q=Rapido%20Captain%20Driver&c=apps',
-        publisherAliases: ['Rapido Bike Taxi', 'ROPPEN TRANSPORTATION SERVICES PRIVATE LIMITED'],
-        titleGroups: [['rapido', 'captain'], ['rapido', 'driver']],
-        brandTokens: ['rapido']
-    },
-    'Namma Yatri': {
-        developerUrl: 'https://play.google.com/store/apps/dev?id=9166297176297744140',
-        searchUrl: 'https://play.google.com/store/search?q=Namma%20Yatri%20Driver%20Partner&c=apps',
-        publisherAliases: ['Moving Tech', 'MOVING TECH INNOVATIONS PRIVATE LIMITED'],
-        titleGroups: [['yatri', 'driver'], ['namma', 'yatri', 'driver'], ['yatri', 'partner'], ['namma', 'yatri', 'partner'], ['mana', 'yatri', 'partner']],
-        brandTokens: ['yatri', 'namma', 'mana']
-    },
-    CityRide: {
-        developerUrl: 'https://play.google.com/store/apps/dev?id=5703122196089736760',
-        searchUrl: 'https://play.google.com/store/search?q=CityRide%20Pilot&c=apps',
-        publisherAliases: ['INEVITABLEX STUDIOS', 'INEVITABLEX STUDIOS PRIVATE LIMITED'],
-        titleGroups: [['cityride', 'pilot'], ['city', 'ride', 'pilot']],
-        brandTokens: ['cityride', 'city ride']
-    },
-    'Odisha Yatri': {
-        developerUrl: 'https://play.google.com/store/apps/dev?id=9166297176297744140',
-        searchUrl: 'https://play.google.com/store/search?q=Odisha%20Yatri%20Driver%20Partner&c=apps',
-        publisherAliases: ['Moving Tech', 'MOVING TECH INNOVATIONS PRIVATE LIMITED'],
-        titleGroups: [['odisha', 'yatri', 'driver'], ['odisha', 'yatri', 'partner']],
-        brandTokens: ['odisha', 'yatri']
-    }
-};
-
-function parsePlayStoreMonitorConfig() {
-    let overrides = {};
-    try {
-        const raw = String(process.env.PLAY_STORE_MONITOR_CONFIG || '').trim();
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) overrides = parsed;
-            else console.error('PLAY_STORE_MONITOR_CONFIG must be a JSON object. Using built-in defaults.');
-        }
-    } catch (error) {
-        console.error('PLAY_STORE_MONITOR_CONFIG JSON is invalid. Using built-in defaults:', error.message || error);
-    }
-    const result = {};
-    for (const platformName of PLAY_STORE_PLATFORMS) {
-        const defaults = PLAY_STORE_MONITOR_DEFAULTS[platformName];
-        const override = overrides[platformName] && typeof overrides[platformName] === 'object' ? overrides[platformName] : {};
-        result[platformName] = {
-            ...defaults,
-            ...override,
-            publisherAliases: Array.isArray(override.publisherAliases) && override.publisherAliases.length
-                ? override.publisherAliases.map(value => String(value).trim()).filter(Boolean)
-                : defaults.publisherAliases,
-            titleGroups: Array.isArray(override.titleGroups) && override.titleGroups.length
-                ? override.titleGroups
-                : defaults.titleGroups,
-            brandTokens: Array.isArray(override.brandTokens) && override.brandTokens.length
-                ? override.brandTokens.map(value => normalizePublisherText(value)).filter(Boolean)
-                : defaults.brandTokens
-        };
-    }
-    return result;
-}
-
-function htmlToPlainText(value) {
-    return String(value || '')
-        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"')
-        .replace(/&#39;|&apos;/gi, "'").replace(/&nbsp;/gi, ' ')
-        .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
-        .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCharCode(parseInt(code, 16)))
-        .replace(/\s+/g, ' ').trim();
-}
-function normalizePublisherText(value) {
-    return htmlToPlainText(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
-function safeGooglePlayUrl(value, allowedPaths) {
-    try {
-        const parsed = new URL(String(value || '').trim());
-        if (parsed.protocol !== 'https:' || parsed.hostname !== 'play.google.com') return null;
-        if (!allowedPaths.some(path => parsed.pathname === path)) return null;
-        return parsed.toString();
-    } catch (_) { return null; }
-}
-function extractPlayStoreCandidates(html, sourceUrl) {
-    const source = String(html || '').replace(/&amp;/g, '&').replace(/\\u0026/g, '&');
-    const output = new Map();
-    const re = /\/store\/apps\/details\?[^"'<>\s]*?\bid=([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)/gi;
-    let match;
-    while ((match = re.exec(source)) !== null) {
-        const packageName = match[1];
-        if (!output.has(packageName)) output.set(packageName, { packageName, sourceUrl: String(sourceUrl || '') });
-        if (output.size >= 80) break;
-    }
-    return [...output.values()];
-}
-function extractTagText(html, tagName) {
-    const match = String(html || '').match(new RegExp(`<${tagName}\\b[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
-    return match ? htmlToPlainText(match[1]) : '';
-}
-function extractMetaContent(html, key) {
-    const tags = String(html || '').match(/<meta\b[^>]*>/gi) || [];
-    for (const tag of tags) {
-        const keyMatch = tag.match(/(?:property|name)=["']([^"']+)["']/i);
-        const contentMatch = tag.match(/content=["']([^"']*)["']/i);
-        if (keyMatch && contentMatch && keyMatch[1].toLowerCase() === String(key).toLowerCase()) {
-            return htmlToPlainText(contentMatch[1]);
-        }
-    }
-    return '';
-}
-function extractGooglePlayTitle(html) {
-    return extractTagText(html, 'h1') || extractMetaContent(html, 'og:title') ||
-        extractTagText(html, 'title').replace(/\s*-\s*Apps on Google Play$/i, '').trim();
-}
-function extractGooglePlayPublisher(html, publisherAliases) {
-    const source = String(html || '');
-    const h1 = source.match(/<h1\b[^>]*>[\s\S]*?<\/h1>/i);
-    const headerRegion = h1 ? source.slice(h1.index + h1[0].length, h1.index + h1[0].length + 5000) : source.slice(0, 7000);
-    const linkPattern = /<a\b[^>]*href=["'][^"']*\/store\/apps\/(?:dev|developer)\?[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi;
-    const publisherLinks = [];
-    let linkMatch;
-    while ((linkMatch = linkPattern.exec(headerRegion)) !== null) {
-        const label = htmlToPlainText(linkMatch[1]);
-        if (label) publisherLinks.push(label);
-    }
-    const aliases = publisherAliases.map(value => normalizePublisherText(value)).filter(Boolean);
-    for (const label of publisherLinks) {
-        const normalized = normalizePublisherText(label);
-        if (aliases.some(alias => normalized === alias || normalized.includes(alias))) return label;
-    }
-    if (publisherLinks.length > 0) return '';
-    const pageText = normalizePublisherText(source);
-    for (let i = 0; i < publisherAliases.length; i++) {
-        if (aliases[i] && pageText.includes(aliases[i])) return publisherAliases[i];
-    }
-    return '';
-}
-function titleMatchesPlatform(title, titleGroups) {
-    const normalized = normalizePublisherText(title);
-    if (!normalized) return false;
-    return titleGroups.some(group => Array.isArray(group) && group.length > 0 &&
-        group.every(token => normalized.includes(normalizePublisherText(token))));
-}
-function titleLooksLikePlatformDriverApp(title, brandTokens) {
-    const normalized = normalizePublisherText(title);
-    const brandPresent = brandTokens.some(token => normalized.includes(token));
-    const rolePresent = ['driver', 'captain', 'partner', 'fleet', 'pilot'].some(token => normalized.includes(token));
-    return brandPresent && rolePresent;
-}
-async function fetchGooglePlayHtml(url) {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'play.google.com') throw new Error('Only official HTTPS Google Play URLs are allowed.');
-    const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; DriverRidePickerCompatibilityMonitor/1.1)',
-            'Accept': 'text/html,application/xhtml+xml',
-            'Accept-Language': 'en-IN,en;q=0.9'
-        },
-        signal: AbortSignal.timeout(12000)
-    });
-    const finalUrl = new URL(response.url || url);
-    if (finalUrl.hostname !== 'play.google.com') throw new Error('Google Play redirected outside play.google.com.');
-    if (!response.ok) throw new Error(`Google Play returned HTTP ${response.status}.`);
-    const html = await response.text();
-    if (html.length < 500) throw new Error('Google Play returned an unexpectedly short page.');
-    return html;
-}
-async function verifyPlayStoreCandidate(platformName, candidate, setting) {
-    const candidatePackage = String(candidate?.packageName || '').trim();
-    const knownOwner = KNOWN_DRIVER_PACKAGE_PLATFORM[candidatePackage];
-    if (knownOwner && knownOwner !== platformName) {
-        return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: `known_package_belongs_to_${knownOwner}` };
-    }
-    if (BLOCKED_DRIVER_PACKAGE_IDS.has(candidatePackage)) {
-        return { ...candidate, verified: false, titleMatch: false, publisherMatch: false, reason: 'known_passenger_app_package' };
-    }
-    const packageName = String(candidate.packageName || '').trim();
-    if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName)) {
-        return { packageName, verified: false, reason: 'invalid_package_id' };
-    }
-    const detailUrl = `https://play.google.com/store/apps/details?id=${encodeURIComponent(packageName)}&hl=en_IN`;
-    try {
-        const html = await fetchGooglePlayHtml(detailUrl);
-        const title = extractGooglePlayTitle(html);
-        const publisher = extractGooglePlayPublisher(html, setting.publisherAliases);
-        const titleMatch = titleMatchesPlatform(title, setting.titleGroups);
-        const publisherMatch = !!publisher;
-        return {
-            packageName, title, publisher, titleMatch, publisherMatch,
-            verified: titleMatch && publisherMatch,
-            sourceUrl: candidate.sourceUrl,
-            detailUrl,
-            reason: titleMatch && publisherMatch ? 'exact_platform_title_and_publisher_match' :
-                (!publisherMatch && titleMatch ? 'title_matches_but_publisher_does_not' :
-                (publisherMatch && !titleMatch ? 'publisher_matches_but_title_needs_review' : 'title_and_publisher_not_verified'))
-        };
-    } catch (error) {
-        return { packageName, verified: false, reason: `detail_page_check_failed: ${String(error.message || error).slice(0, 140)}`, sourceUrl: candidate.sourceUrl, detailUrl };
-    }
-}
-async function tryAutoApproveReportedUnknownPackage(packageName) {
-    const safePackage = String(packageName || '').trim();
-    if (!/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(safePackage)) return { status: 'invalid_package_id' };
-    const cacheKey = `play-package-unknown-check:${safePackage}`;
-    const cachedRaw = await redis.get(cacheKey);
-    if (cachedRaw) {
-        const cached = typeof cachedRaw === 'string' ? JSON.parse(cachedRaw) : cachedRaw;
-        if (cached && Number(cached.checkedAtMs || 0) > Date.now() - 6 * 60 * 60 * 1000) {
-            return { ...cached, cached: true };
-        }
-    }
-    const monitor = parsePlayStoreMonitorConfig();
-    const checks = await Promise.all(PLAY_STORE_PLATFORMS.map(platformName =>
-        verifyPlayStoreCandidate(platformName, { packageName: safePackage, sourceUrl: 'android_unknown_package_telemetry' }, monitor[platformName])
-    ));
-    const matches = checks.filter(item => item.verified);
-    let result;
-    if (matches.length === 1) {
-        const candidate = matches[0];
-        const platformName = PLAY_STORE_PLATFORMS.find(name =>
-            verifyPlayStoreTitleAndPublisherMatch(name, candidate, monitor[name])
-        );
-        if (!platformName) {
-            result = { status: 'manual_review_required', packageName: safePackage, checks };
-        } else {
-            const saved = await addVerifiedPackageToRemoteConfig(platformName, safePackage, {
-                source: 'android_unknown_package_telemetry_verified_on_google_play',
-                publisher: candidate.publisher,
-                title: candidate.title,
-                detailUrl: candidate.detailUrl,
-                verification: 'exact_platform_title_and_publisher_match'
-            });
-            result = { status: saved.added ? 'auto_approved' : 'already_present', platform: platformName, packageName: safePackage, configVersion: saved.version, title: candidate.title, publisher: candidate.publisher };
-        }
-    } else if (matches.length > 1) {
-        result = { status: 'manual_review_required_multiple_platforms', packageName: safePackage, checks };
-    } else {
-        result = { status: 'manual_review_required', packageName: safePackage, checks };
-    }
-    result.checkedAtMs = Date.now();
-    await redis.set(cacheKey, JSON.stringify(result), { ex: 21600 });
-    return result;
-}
-function verifyPlayStoreTitleAndPublisherMatch(platformName, candidate, setting) {
-    return !!setting && titleMatchesPlatform(candidate.title, setting.titleGroups) &&
-        !!candidate.publisher && setting.publisherAliases.some(alias =>
-            normalizePublisherText(candidate.publisher) === normalizePublisherText(alias) ||
-            normalizePublisherText(candidate.publisher).includes(normalizePublisherText(alias))
-        );
-}
-
-async function runWithConcurrency(items, limit, worker) {
-    const output = new Array(items.length);
-    let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-        while (true) {
-            const index = nextIndex++;
-            if (index >= items.length) return;
-            output[index] = await worker(items[index], index);
-        }
-    });
-    await Promise.all(workers);
-    return output;
-}
-async function getCurrentPlatformPackageNames(platformName) {
-    const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
-    const parsed = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
-    const merged = mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, parsed);
-    const values = merged.platforms?.[platformName]?.package_names;
-    return new Set(Array.isArray(values) ? values.map(value => String(value).trim()) : []);
-}
-async function addVerifiedPackageToRemoteConfig(platformName, packageName, verification) {
-    const normalizedPackage = String(packageName || '').trim();
-    if (BLOCKED_DRIVER_PACKAGE_IDS.has(normalizedPackage)) throw new Error('Passenger application package cannot be added to driver config.');
-    const knownOwner = KNOWN_DRIVER_PACKAGE_PLATFORM[normalizedPackage];
-    if (knownOwner && knownOwner !== platformName) throw new Error(`This package is assigned to ${knownOwner}.`);
-    const stored = await redis.get(RIDE_BOT_CONFIG_DATA_KEY);
-    const previous = stored ? (typeof stored === 'string' ? JSON.parse(stored) : stored) : {};
-    const merged = normalizeRideBotConfig(mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, previous));
-    const platformConfig = { ...(merged.platforms?.[platformName] || {}) };
-    const current = Array.isArray(platformConfig.package_names) ? platformConfig.package_names : [];
-    if (current.includes(packageName)) return { added: false, version: await getRideBotConfigVersion() };
-    platformConfig.package_names = [...new Set([...current, packageName])];
-    merged.platforms = { ...merged.platforms, [platformName]: platformConfig };
-    await redis.set(RIDE_BOT_CONFIG_DATA_KEY, JSON.stringify(merged));
-    const previousVersion = await getRideBotConfigVersion();
-    const version = previousVersion + 1;
-    await redis.set(RIDE_BOT_CONFIG_VERSION_KEY, String(version));
-    clearRideConfigCache();
-    await redis.set(`play-package-verified:${platformName}:${packageName}`, JSON.stringify({
-        ...verification, verifiedAt: new Date().toISOString(), configVersion: version
-    }), { ex: 31536000 });
-    return { added: true, previousVersion, version };
-}
-async function sendPlayStoreReviewAlert(platformName, setting, reason, evidence) {
-    const key = `play-package-review:${platformName}`;
-    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ reason, evidence })).digest('hex');
-    const oldRaw = await redis.get(key);
-    const old = oldRaw ? (typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw) : {};
-    const now = Date.now();
-    if (old.fingerprint === fingerprint && now - Number(old.lastAttemptAt || 0) < 24 * 60 * 60 * 1000) {
-        return { sent: false, suppressed: true };
-    }
-
-    const filteredEvidence = evidence.filter(item => !BLOCKED_DRIVER_PACKAGE_IDS.has(String(item.packageName || '').trim()));
-
-    let candidatePackage = "unknown";
-    for (let item of filteredEvidence) {
-        if (item.packageName && item.packageName !== 'unknown') {
-            candidatePackage = item.packageName;
-            break;
-        }
-    }
-
-    const candidates = filteredEvidence.slice(0, 12).map(item =>
-        `${item.packageName || 'unknown'} | ${item.title || item.reason || 'title unavailable'} | publisher=${item.publisher || 'unverified'}`
-    );
-    const message = [
-        '⚠️ DRIVER RIDE PICKER — GOOGLE PLAY PACKAGE REVIEW REQUIRED',
-        `Platform: ${platformName}`,
-        `Reason: ${reason}`,
-        `Expected publisher: ${setting.publisherAliases.join(' OR ')}`,
-        `Candidates:\n${candidates.join('\n') || 'No package candidates found.'}`,
-        `\n👇 Niche diye gaye button se approve karein (Agar yeh sahi app hai)`
-    ].join('\n');
-
-    const approveData = `approve_pkg|${platformName}|${candidatePackage}`;
-    const canApprove = candidatePackage !== 'unknown' && Buffer.byteLength(approveData, 'utf8') <= 64;
-    const replyMarkup = canApprove ? {
-        inline_keyboard: [[
-            { text: "✅ Approve & Add", callback_data: approveData },
-            { text: "❌ Ignore", callback_data: 'ignore_pkg' }
-        ]]
-    } : null;
-
-    let result = { sent: false, reason: 'Telegram is not configured.' };
-    try {
-        result = await sendTelegramMessage(message, replyMarkup);
-    }
-    catch (error) {
-        result = { sent: false, reason: String(error.message || error).slice(0, 180) };
-    }
-    await redis.set(key, JSON.stringify({ fingerprint, lastAttemptAt: now, telegramSent: !!result.sent, reason }), { ex: 7776000 });
-    return result;
-}
-async function runPlayStorePackageDiscovery() {
-    const monitor = parsePlayStoreMonitorConfig();
-    const results = [];
-    for (const platformName of PLAY_STORE_PLATFORMS) {
-        const setting = monitor[platformName];
-        const developerUrl = safeGooglePlayUrl(setting.developerUrl, ['/store/apps/dev', '/store/apps/developer']);
-        const searchUrl = safeGooglePlayUrl(setting.searchUrl, ['/store/search']);
-        if (!developerUrl || !searchUrl || !setting.publisherAliases.length || !setting.titleGroups.length) {
-            results.push({ platform: platformName, status: 'invalid_monitor_settings' });
-            continue;
-        }
-        try {
-            const sourceResults = await Promise.allSettled([fetchGooglePlayHtml(developerUrl), fetchGooglePlayHtml(searchUrl)]);
-            const sourceErrors = sourceResults.filter(item => item.status === 'rejected').map(item => String(item.reason?.message || item.reason).slice(0, 150));
-            const candidatesByPackage = new Map();
-            for (let i = 0; i < sourceResults.length; i++) {
-                const item = sourceResults[i];
-                if (item.status !== 'fulfilled') continue;
-                const url = i === 0 ? developerUrl : searchUrl;
-                for (const candidate of extractPlayStoreCandidates(item.value, url)) {
-                    if (!candidatesByPackage.has(candidate.packageName)) candidatesByPackage.set(candidate.packageName, candidate);
-                }
-            }
-            const allCandidates = [...candidatesByPackage.values()];
-            const currentPackages = await getCurrentPlatformPackageNames(platformName);
-            const newCandidates = allCandidates.filter(item => !currentPackages.has(item.packageName)).slice(0, 16);
-            if (newCandidates.length === 0) {
-                if (sourceErrors.length === 2) {
-                    const evidence = [{ packageName: '', reason: sourceErrors.join(' / ') }];
-                    const telegram = await sendPlayStoreReviewAlert(platformName, setting, 'Both official Google Play source pages could not be read.', evidence);
-                    results.push({ platform: platformName, status: 'source_check_failed', telegramSent: !!telegram.sent, errors: sourceErrors });
-                } else {
-                    results.push({ platform: platformName, status: 'no_change', candidateCount: allCandidates.length, sourceWarnings: sourceErrors });
-                }
-                continue;
-            }
-            const checks = await runWithConcurrency(newCandidates, 4, candidate => verifyPlayStoreCandidate(platformName, candidate, setting));
-            const verified = checks.filter(item => item.verified);
-            
-            if (verified.length === 1) {
-                const candidate = verified[0];
-                const saved = await addVerifiedPackageToRemoteConfig(platformName, candidate.packageName, {
-                    source: 'official_google_play_developer_and_search_pages',
-                    publisher: candidate.publisher,
-                    title: candidate.title,
-                    sourceUrl: candidate.sourceUrl,
-                    detailUrl: candidate.detailUrl,
-                    verification: candidate.reason
-                });
-                const message = [
-                    '✅ DRIVER RIDE PICKER — VERIFIED PACKAGE AUTO-ADDED',
-                    `Platform: ${platformName}`,
-                    `App: ${candidate.title}`,
-                    `Publisher: ${candidate.publisher}`,
-                    `New package ID: ${candidate.packageName}`,
-                    `Remote config version: ${saved.version}`,
-                    'Compatible installed APKs can receive this package on their next remote-config refresh.',
-                    `Time: ${new Date().toISOString()}`
-                ].join('\n');
-                try { await sendTelegramMessage(message); } catch (error) { console.error('PLAY STORE SUCCESS TELEGRAM ERROR:', error.message || error); }
-                results.push({ platform: platformName, packageName: candidate.packageName, status: saved.added ? 'auto_approved' : 'already_present', configVersion: saved.version, title: candidate.title, publisher: candidate.publisher });
-            } else if (verified.length > 1) {
-                const telegram = await sendPlayStoreReviewAlert(platformName, setting, 'More than one new listing passed title and publisher checks; automatic selection is unsafe.', verified);
-                results.push({ platform: platformName, status: 'manual_review_required_multiple_verified', verifiedCount: verified.length, telegramSent: !!telegram.sent });
-            } else {
-                const possible = checks.filter(item => !BLOCKED_DRIVER_PACKAGE_IDS.has(item.packageName) && (item.publisherMatch || (item.titleMatch && titleLooksLikePlatformDriverApp(item.title, setting.brandTokens))));
-                if (possible.length > 0 || sourceErrors.length > 0) {
-                    const reason = possible.length > 0
-                        ? 'A possible replacement listing was found, but it did not pass both title and publisher checks.'
-                        : 'Google Play source results were incomplete; no candidate could be verified.';
-                    const telegram = await sendPlayStoreReviewAlert(platformName, setting, reason, possible.length ? possible : checks.slice(0, 12));
-                    results.push({ platform: platformName, status: 'manual_review_required', reviewedCount: checks.length, telegramSent: !!telegram.sent, sourceWarnings: sourceErrors });
-                } else {
-                    results.push({ platform: platformName, status: 'no_verified_replacement', reviewedCount: checks.length, sourceWarnings: sourceErrors });
-                }
-            }
-        } catch (error) {
-            const evidence = [{ packageName: '', reason: String(error.message || error).slice(0, 160) }];
-            let telegram = { sent: false };
-            try { telegram = await sendPlayStoreReviewAlert(platformName, setting, 'The package discovery check failed unexpectedly.', evidence); } catch (_) {}
-            results.push({ platform: platformName, status: 'check_failed', error: String(error.message || error).slice(0, 180), telegramSent: !!telegram.sent });
-        }
-    }
-    return { success: true, checkedAt: new Date().toISOString(), results };
-}
-
-app.get('/api/cron/play-store-package-discovery', async (req, res) => {
-    const expected = String(process.env.CRON_SECRET || '');
-    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!expected || !supplied || !safeEqualHex(sha512(expected), sha512(supplied))) {
-        return res.status(401).json({ success: false, message: 'Unauthorized cron request.' });
-    }
-    try { return res.json(await runPlayStorePackageDiscovery()); }
-    catch (error) {
-        console.error('PLAY STORE PACKAGE DISCOVERY ERROR:', error.message || error);
-        return res.status(500).json({ success: false, message: 'Play Store package discovery failed.' });
-    }
+app.get('/api/cron/play-store-package-discovery', (req, res) => {
+    return res.status(200).json({ success: true, disabled: true, message: 'Automatic Play Store discovery is disabled.' });
 });
-app.post('/api/admin/play-store-package-discovery/run', async (req, res) => {
+app.post('/api/admin/play-store-package-discovery/run', (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
-    try { return res.json(await runPlayStorePackageDiscovery()); }
-    catch (error) { return res.status(500).json({ success: false, message: 'Play Store package discovery failed.' }); }
+    return res.status(200).json({ success: true, disabled: true, message: 'Automatic Play Store discovery is disabled.' });
 });
 
 app.get('/api/cron/hourly-summary', (req, res) => {
@@ -2083,75 +1453,9 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
     } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' }); }
 });
 
-app.post('/api/telegram/webhook', async (req, res) => {
-    try {
-        const webhookSecret = String(process.env.TELEGRAM_WEBHOOK_SECRET || '');
-        const suppliedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '');
-        if (!webhookSecret || !safeEqualHex(sha512(webhookSecret), sha512(suppliedSecret))) {
-            return res.status(403).json({ ok: false });
-        }
-
-        const update = req.body;
-        const expectedChatId = String(process.env.TELEGRAM_CHAT_ID || '').trim();
-
-        if (update.callback_query) {
-            const callbackQuery = update.callback_query;
-            const chatId = String(callbackQuery.message.chat.id);
-            const data = callbackQuery.data;
-            const messageId = callbackQuery.message.message_id;
-
-            if (chatId !== expectedChatId) return res.status(403).json({ ok: false });
-
-            if (data.startsWith("approve_pkg|")) {
-                const parts = data.split("|");
-                const platformName = parts[1];
-                const packageName = parts[2];
-
-                if (!PLAY_STORE_PLATFORMS.includes(platformName) || !/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/.test(packageName) || BLOCKED_DRIVER_PACKAGE_IDS.has(packageName)) {
-                    return res.status(200).send('OK');
-                }
-
-                const saved = await addVerifiedPackageToRemoteConfig(platformName, packageName, {
-                    source: 'telegram_admin_manual_approval',
-                    approvedAt: new Date().toISOString()
-                });
-
-                const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-                await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        message_id: messageId,
-                        text: `✅ APPROVED!\nPackage: ${packageName}\nPlatform: ${platformName}\nConfig Version: ${saved.version}\nAdded to remote config successfully.`,
-                    })
-                });
-
-                await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ callback_query_id: callbackQuery.id, text: "Package Approved!" })
-                });
-
-            } else if (data === "ignore_pkg") {
-                const token = String(process.env.TELEGRAM_BOT_TOKEN || '').trim();
-                await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        message_id: messageId,
-                        text: `❌ IGNORED.\nNo package was added.`,
-                    })
-                });
-                await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ callback_query_id: callbackQuery.id, text: "Ignored" })
-                });
-            }
-        }
-        return res.status(200).send('OK');
-    } catch (error) {
-        console.error('TELEGRAM WEBHOOK ERROR:', error);
-        return res.status(200).send('OK');
-    }
+app.post('/api/telegram/webhook', (req, res) => {
+    // Telegram automation disabled. Acknowledge webhook delivery without work.
+    return res.status(200).send('OK');
 });
 
 module.exports = app;
