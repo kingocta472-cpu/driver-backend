@@ -1,5 +1,5 @@
 /*
- * Driver Ride Picker backend. (FINAL - 100% ACTIVATION GUARANTEE)
+ * Driver Ride Picker backend. (FINAL - 100% ACTIVATION GUARANTEE + WEBHOOK)
  */
 
 const express = require('express');
@@ -21,13 +21,14 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Firebase-AppCheck', 'X-Tracker-Admin-Key']
 }));
 app.use(express.urlencoded({ extended: false, limit: '64kb' }));
-app.use(express.json({ limit: '1mb' }));
+// Webhook signature verify karne ke liye rawBody save karna zaroori hai
+app.use(express.json({ limit: '1mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 
 // ============================================================
 // SPEED CACHES
 // ============================================================
 let rideConfigCache = { at: 0, body: null };
-const RIDE_CONFIG_CACHE_MS = 5 * 60 * 1000; // 5 min per warm server instance
+const RIDE_CONFIG_CACHE_MS = 5 * 60 * 1000; 
 function clearRideConfigCache() { rideConfigCache = { at: 0, body: null }; }
 
 const userByUidCache = new Map();
@@ -71,7 +72,6 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-// ✅ NO FORCED UPDATE: koi bhi app version chalega, update kabhi nahi maangega.
 const APP_LATEST_VERSION = '1.19.8';
 const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.8/app-release.apk';
 const APP_UPDATE_TITLE = 'Driver Ride Picker';
@@ -243,7 +243,66 @@ async function verifyPayUTransaction(txnid, cfg) {
 }
 
 // ============================================================
-// CONFIG MERGE
+// CORE ACTIVATION LOGIC (Used by both API and Webhook)
+// ============================================================
+async function processPlanActivation(orderId, paymentId, paymentGateway) {
+    const db = getDB();
+    const orderRef = db.collection('paymentOrders').doc(orderId);
+    const orderSnapshot = await orderRef.get();
+    if (!orderSnapshot.exists) throw new Error('Order not found');
+    
+    const orderData = orderSnapshot.data() || {};
+    if (orderData.status === 'paid') return { alreadyProcessed: true, planType: orderData.planType, planExpiry: orderData.planExpiry };
+
+    let planType = String(orderData.planType || '').toUpperCase(); 
+    let planDurationMs = Number(orderData.planDurationMs || 0);
+    
+    // Fallback if plan data is missing
+    if (!VALID_PLAN_TYPES.includes(planType) || planDurationMs <= 0) {
+        const fallback = PLAN_CONFIG_BY_AMOUNT[orderData.amountRupees];
+        if (fallback) {
+            planType = fallback.type;
+            planDurationMs = fallback.durationMs;
+        } else {
+            throw new Error('Invalid plan data');
+        }
+    }
+
+    const userRef = db.collection('users').doc(normalizePhone(orderData.phone));
+    let newPlanExpiry = 0;
+
+    await db.runTransaction(async transaction => {
+        const freshOrder = await transaction.get(orderRef); 
+        const freshUser = await transaction.get(userRef);
+        
+        if (!freshUser.exists) throw new Error('Driver account not found.');
+        if (freshOrder.data()?.status === 'paid') { 
+            newPlanExpiry = Number(freshUser.data()?.planExpiry || 0); 
+            return; 
+        }
+
+        const now = Date.now(); 
+        const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
+        newPlanExpiry = (currentExpiry > now ? currentExpiry : now) + planDurationMs;
+
+        transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
+        transaction.update(orderRef, { 
+            status: 'paid', 
+            paymentId: paymentId, 
+            paymentGateway: paymentGateway,
+            activatedPlan: planType, 
+            planExpiry: newPlanExpiry, 
+            paidAt: admin.firestore.FieldValue.serverTimestamp() 
+        });
+    });
+    
+    userByUidCache.clear();
+    return { alreadyProcessed: false, planType, planExpiry: newPlanExpiry };
+}
+
+
+// ============================================================
+// CONFIG MERGE & VALIDATOR
 // ============================================================
 function mergeStrategies(baseStrategies, overrideStrategies) {
     const result = {};
@@ -276,9 +335,6 @@ function mergeConfigObjects(base, override) {
     return merged;
 }
 
-// ============================================================
-// VALIDATOR
-// ============================================================
 const PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 
 function validateRemoteRideConfig(input) {
@@ -396,7 +452,6 @@ const BLOCKED_DRIVER_PACKAGE_IDS = new Set([
     'in.mobility.keralasavaariconsumer', 'com.mobility.movingtech', 'net.openkochi.yatri'
 ]);
 
-// Known driver packages must never be auto-assigned to a different platform.
 const KNOWN_DRIVER_PACKAGE_PLATFORM = Object.freeze({
     'in.mobility.odishayatripartner': 'Odisha Yatri'
 });
@@ -1183,6 +1238,43 @@ app.get('/api/payment/providers', verifyFirebaseToken, async (req, res) => {
 
     return res.json({ success: true, providers, defaultProvider });
 });
+
+// 🔥 RAZORPAY WEBHOOK (100% Activation even if screen closes)
+app.post('/api/payment/webhook/razorpay', async (req, res) => {
+    try {
+        const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+        if (!secret) {
+            console.warn('RAZORPAY_WEBHOOK_SECRET is not set. Ignoring webhook.');
+            return res.status(200).send('Webhook secret not configured');
+        }
+
+        const signature = req.headers['x-razorpay-signature'];
+        const expectedSignature = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
+
+        if (expectedSignature !== signature) {
+            console.error('Razorpay webhook signature mismatch.');
+            return res.status(400).send('Invalid signature');
+        }
+
+        const event = req.body.event;
+        if (event === 'payment.captured' || event === 'order.paid') {
+            const paymentEntity = req.body.payload.payment.entity;
+            const orderId = paymentEntity.order_id;
+            const paymentId = paymentEntity.id;
+
+            console.log(`Webhook received: Plan activation for order ${orderId}, payment ${paymentId}`);
+            
+            // Activate plan using core logic
+            const result = await processPlanActivation(orderId, paymentId, 'RAZORPAY_WEBHOOK');
+            console.log(`Webhook activation success:`, result);
+        }
+        return res.status(200).send('OK');
+    } catch (error) {
+        console.error('RAZORPAY WEBHOOK ERROR:', error.message);
+        return res.status(500).send('Webhook error');
+    }
+});
+
 app.post('/api/payment/payu/create-order', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = getAuthenticatedPhone(req);
@@ -1251,7 +1343,6 @@ app.post('/api/payment/payu/return', async (req, res) => {
         
         if (orderData.status === 'paid') return successPage();
 
-        // 🔥 FIX: Verify PayU transaction, but do not fail hard if API fails (rely on valid hash)
         let verifiedStatus = String(body.status || '').toLowerCase();
         let verifiedAmount = Number(body.amount || 0);
         let mihpayid = String(body.mihpayid || '');
@@ -1274,43 +1365,7 @@ app.post('/api/payment/payu/return', async (req, res) => {
             return failPage('PayU verification amount mismatch.');
         }
 
-        // 🔥 FIX: Plan Data Fallback
-        let planType = String(orderData.planType || '').toUpperCase();
-        let duration = Number(orderData.planDurationMs || 0);
-
-        if (!VALID_PLAN_TYPES.includes(planType) || duration <= 0) {
-            const fallback = PLAN_CONFIG_BY_AMOUNT[orderData.amountRupees];
-            if (fallback) {
-                planType = fallback.type;
-                duration = fallback.durationMs;
-            } else {
-                throw new Error('Invalid stored PayU plan details.');
-            }
-        }
-
-        const db = getDB();
-        const userRef = db.collection('users').doc(normalizePhone(orderData.phone));
-        let newPlanExpiry = 0;
-        
-        await db.runTransaction(async transaction => {
-            const freshOrder = await transaction.get(orderRef);
-            const freshUser = await transaction.get(userRef);
-            if (!freshUser.exists) throw new Error('Driver account not found.');
-            
-            if (freshOrder.data()?.status === 'paid') { 
-                newPlanExpiry = Number(freshUser.data()?.planExpiry || 0); 
-                return; 
-            }
-            
-            const now = Date.now();
-            const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
-            newPlanExpiry = (currentExpiry > now ? currentExpiry : now) + duration;
-            
-            transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-            transaction.update(orderRef, { status: 'paid', paymentGateway: 'PAYU', paymentId: mihpayid, payuStatus: verifiedStatus, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
-        });
-        
-        userByUidCache.clear();
+        await processPlanActivation(`payu_${txnid}`, mihpayid, 'PAYU');
         return successPage();
     } catch (error) {
         console.error('PAYU RETURN/VERIFY ERROR:', error.message || error);
@@ -1357,42 +1412,8 @@ app.post('/api/payment/payu/verify', verifyFirebaseToken, async (req, res) => {
             return res.status(400).json({ success: false, message: 'PayU transaction amount or reference mismatch.' });
         }
 
-        // 🔥 FIX: Plan Data Fallback
-        let planType = String(orderData.planType || '').toUpperCase();
-        let duration = Number(orderData.planDurationMs || 0);
-
-        if (!VALID_PLAN_TYPES.includes(planType) || duration <= 0) {
-            const fallback = PLAN_CONFIG_BY_AMOUNT[orderData.amountRupees];
-            if (fallback) {
-                planType = fallback.type;
-                duration = fallback.durationMs;
-            } else {
-                throw new Error('Invalid stored PayU plan details.');
-            }
-        }
-
-        let planExpiry = 0;
-        await db.runTransaction(async transaction => {
-            const freshOrder = await transaction.get(orderRef);
-            const userRef = db.collection('users').doc(phone);
-            const freshUser = await transaction.get(userRef);
-            if (!freshUser.exists) throw new Error('Driver account not found.');
-            
-            if (freshOrder.data()?.status === 'paid') { 
-                planExpiry = Number(freshOrder.data()?.planExpiry || freshUser.data()?.planExpiry || 0); 
-                return; 
-            }
-            
-            const now = Date.now();
-            const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
-            planExpiry = (currentExpiry > now ? currentExpiry : now) + duration;
-            
-            transaction.update(userRef, { activePlan: planType, planExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-            transaction.update(orderRef, { status: 'paid', paymentGateway: 'PAYU', paymentId: mihpayid, payuStatus: verifiedStatus, activatedPlan: planType, planExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
-        });
-        
-        userByUidCache.delete(req.firebaseUser.uid);
-        return res.json({ success: true, alreadyProcessed: false, provider: 'PAYU', status: 'success', planType, planExpiry, planExpiryIso: planExpiry ? new Date(planExpiry).toISOString() : null, message: 'Payment verified and plan activated.' });
+        const result = await processPlanActivation(`payu_${txnid}`, mihpayid, 'PAYU');
+        return res.json({ success: true, alreadyProcessed: false, provider: 'PAYU', status: 'success', planType: result.planType, planExpiry: result.planExpiry, planExpiryIso: result.planExpiry ? new Date(result.planExpiry).toISOString() : null, message: 'Payment verified and plan activated.' });
     } catch (error) {
         console.error('PAYU APP VERIFY ERROR:', error.message || error);
         return res.status(500).json({ success: false, message: 'Unable to verify PayU payment right now.' });
@@ -1488,13 +1509,11 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
         const orderData = orderSnapshot.data() || {};
         if (normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
         
-        // 1. Verify Signature (Primary Security Check)
         if (!verifyRazorpaySignature(orderId, paymentId, signature)) return res.status(400).json({ success: false, message: 'Invalid signature.' });
         
         if (orderData.status === 'paid') return res.json({ success: true, alreadyProcessed: true, planType: orderData.planType || PLAN_TYPE_NONE, message: 'Payment already processed.' });
 
-        // 2. Fetch Payment Status (Secondary Check, but do not fail hard if API fails)
-        let paymentStatus = 'captured'; // Assume captured if signature is valid and API fails
+        let paymentStatus = 'captured'; 
         let paymentAmount = Number(orderData.amountPaise);
 
         try {
@@ -1508,7 +1527,6 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
             }
         } catch (fetchError) {
             console.error('Razorpay fetch failed, relying on signature validation:', fetchError.message);
-            // If fetch fails (e.g. network error), we trust the valid signature and proceed.
         }
 
         if (paymentStatus !== 'captured' && paymentStatus !== 'authorized') {
@@ -1519,40 +1537,8 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Payment amount mismatch.' });
         }
 
-        // 3. Plan Data Fallback
-        let planType = String(orderData.planType || '').toUpperCase(); 
-        let planDurationMs = Number(orderData.planDurationMs || 0);
-        
-        if (!VALID_PLAN_TYPES.includes(planType) || planDurationMs <= 0) {
-            const fallback = PLAN_CONFIG_BY_AMOUNT[orderData.amountRupees];
-            if (fallback) {
-                planType = fallback.type;
-                planDurationMs = fallback.durationMs;
-            } else {
-                return res.status(400).json({ success: false, message: 'Invalid plan data.' });
-            }
-        }
-
-        const userRef = db.collection('users').doc(phone); 
-        let newPlanExpiry = 0;
-
-        await db.runTransaction(async transaction => {
-            const freshOrder = await transaction.get(orderRef); 
-            const freshUser = await transaction.get(userRef);
-            if (!freshUser.exists) throw new Error('Driver account not found.');
-            if (freshOrder.data()?.status === 'paid') { newPlanExpiry = Number(freshUser.data()?.planExpiry || 0); return; }
-
-            const now = Date.now(); 
-            const currentExpiry = Number(freshUser.data()?.planExpiry || 0);
-            newPlanExpiry = (currentExpiry > now ? currentExpiry : now) + planDurationMs;
-
-            transaction.update(userRef, { activePlan: planType, planExpiry: newPlanExpiry, updatedAt: admin.firestore.FieldValue.serverTimestamp() });
-            transaction.update(orderRef, { status: 'paid', paymentId, signature, activatedPlan: planType, planExpiry: newPlanExpiry, paidAt: admin.firestore.FieldValue.serverTimestamp() });
-        });
-        
-        userByUidCache.delete(req.firebaseUser.uid);
-
-        return res.json({ success: true, alreadyProcessed: false, planType, planExpiry: newPlanExpiry, planExpiryIso: new Date(newPlanExpiry).toISOString(), message: `${planType} plan activated successfully.` });
+        const result = await processPlanActivation(orderId, paymentId, 'RAZORPAY');
+        return res.json({ success: true, alreadyProcessed: false, planType: result.planType, planExpiry: result.planExpiry, planExpiryIso: new Date(result.planExpiry).toISOString(), message: `${result.planType} plan activated successfully.` });
     } catch (error) { 
         return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' }); 
     }
