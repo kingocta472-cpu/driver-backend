@@ -7,7 +7,10 @@ const cors = require('cors');
 const admin = require('firebase-admin');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const { promisify } = require('util');
 const { Redis } = require('@upstash/redis');
+
+const scryptAsync = promisify(crypto.scrypt);
 
 const app = express();
 
@@ -142,11 +145,23 @@ function getDB() {
 // ============================================================
 // RAZORPAY INIT
 // ============================================================
+let razorpayClientCache = { keyId: '', keySecret: '', client: null };
+
 function getRazorpay() {
-    const keyId = process.env.RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+    const keyId = String(process.env.RAZORPAY_KEY_ID || '').trim();
+    const keySecret = String(process.env.RAZORPAY_KEY_SECRET || '').trim();
     if (!keyId || !keySecret) throw new Error('Razorpay keys are missing.');
-    return new Razorpay({ key_id: keyId, key_secret: keySecret });
+
+    // Reuse the SDK client across warm serverless invocations.
+    if (razorpayClientCache.client &&
+        razorpayClientCache.keyId === keyId &&
+        razorpayClientCache.keySecret === keySecret) {
+        return razorpayClientCache.client;
+    }
+
+    const client = new Razorpay({ key_id: keyId, key_secret: keySecret });
+    razorpayClientCache = { keyId, keySecret, client };
+    return client;
 }
 
 // ============================================================
@@ -171,18 +186,25 @@ function generateReferralCode() {
     for (let i = 0; i < REFERRAL_CODE_LENGTH; i++) code += REFERRAL_CODE_ALPHABET[bytes[i] % REFERRAL_CODE_ALPHABET.length];
     return code;
 }
-function createPinHash(pin) {
+async function createPinHash(pin) {
     const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.scryptSync(String(pin).trim(), salt, 64, { N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 }).toString('hex');
-    return { pinSalt: salt, pinHash: hash };
+    const hash = await scryptAsync(String(pin).trim(), salt, 64, {
+        N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
+    });
+    return { pinSalt: salt, pinHash: Buffer.from(hash).toString('hex') };
 }
-function verifyPinHash(pin, salt, expectedHash) {
+async function verifyPinHash(pin, salt, expectedHash) {
     if (!isValidPin(pin) || !salt || !expectedHash) return false;
     try {
-        const actual = crypto.scryptSync(String(pin).trim(), String(salt), 64, { N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024 });
+        const actual = await scryptAsync(String(pin).trim(), String(salt), 64, {
+            N: 16384, r: 8, p: 1, maxmem: 32 * 1024 * 1024
+        });
         const expected = Buffer.from(String(expectedHash), 'hex');
         return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
-    } catch (error) { return false; }
+    } catch (error) {
+        console.error('ASYNC PIN HASH ERROR:', error.message || error);
+        return false;
+    }
 }
 function hashInstallId(installId) { return crypto.createHash('sha256').update(`driver-ride-picker-install:${installId}`).digest('hex'); }
 function hashPhoneForAuth(phone) { return crypto.createHash('sha256').update(`driver-ride-picker-auth:${phone}`).digest('hex'); }
@@ -233,7 +255,12 @@ function verifyPayUResponseHash(body, salt) {
 async function verifyPayUTransaction(txnid, cfg) {
     const requestHash = sha512(`${cfg.key}|verify_payment|${txnid}|${cfg.salt}`);
     const form = new URLSearchParams({ key: cfg.key, command: 'verify_payment', var1: txnid, hash: requestHash });
-    const response = await fetch(cfg.verifyUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form });
+    const response = await fetch(cfg.verifyUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: form,
+        signal: AbortSignal.timeout(12000)
+    });
     if (!response.ok) throw new Error(`PayU verification HTTP ${response.status}`);
     const result = await response.json();
     const transaction = result?.transaction_details?.[txnid];
@@ -695,15 +722,18 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
         if (!installId) return res.status(400).json({ success: false, message: 'App installation identity required.' });
 
         const db = getDB();
-        const lockState = await getPinLockState(db, phone);
+        const userRef = db.collection('users').doc(phone);
+
+        // Run independent Firestore reads together to reduce login round trips.
+        const [lockState, existingUserDoc] = await Promise.all([
+            getPinLockState(db, phone),
+            userRef.get()
+        ]);
 
         if (lockState.locked) {
             const remainingMinutes = Math.max(1, Math.ceil((lockState.lockedUntilMs - Date.now()) / (60 * 1000)));
             return res.status(429).json({ success: false, message: `Too many wrong PIN attempts. Try again in ${remainingMinutes} minute(s).` });
         }
-
-        const userRef = db.collection('users').doc(phone);
-        const existingUserDoc = await userRef.get();
         const driverFirebaseUid = generateDriverFirebaseUid(phone);
 
         let isNewUser = false; let trialAdded = false; let pinWasCreated = false; let userData = null;
@@ -713,13 +743,13 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
             const updates = {};
 
             if (userData.pinHash && userData.pinSalt) {
-                if (!verifyPinHash(pin, userData.pinSalt, userData.pinHash)) {
+                if (!(await verifyPinHash(pin, userData.pinSalt, userData.pinHash))) {
                     const failure = await recordPinFailure(db, phone);
                     if (failure.locked) return res.status(429).json({ success: false, message: `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.` });
                     return res.status(401).json({ success: false, message: 'Invalid mobile number or PIN.' });
                 }
             } else {
-                const pinData = createPinHash(pin);
+                const pinData = await createPinHash(pin);
                 updates.pinSalt = pinData.pinSalt; updates.pinHash = pinData.pinHash; updates.pinCreatedAt = admin.firestore.FieldValue.serverTimestamp(); pinWasCreated = true;
             }
 
@@ -729,12 +759,16 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
             if (typeof userData.planExpiry !== 'number') updates.planExpiry = updates.planExpiry || 0;
             if (typeof userData.totalRides !== 'number') updates.totalRides = Number(userData.totalRides || 0);
 
-            updates.firebaseUid = driverFirebaseUid; updates.authMethod = 'pin';
+            if (userData.firebaseUid !== driverFirebaseUid) updates.firebaseUid = driverFirebaseUid;
+            if (userData.authMethod !== 'pin') updates.authMethod = 'pin';
             if (!userData.referralCode) updates.referralCode = await createUniqueReferralCode(db, userRef);
-            updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
 
-            await userRef.update(updates);
-            userData = { ...userData, ...updates };
+            // Avoid a Firestore write on every normal login when nothing changed.
+            if (Object.keys(updates).length > 0) {
+                updates.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+                await userRef.update(updates);
+                userData = { ...userData, ...updates };
+            }
         } else {
             try {
                 const clientIp = String(req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
@@ -767,7 +801,7 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 }
             }
 
-            const pinData = createPinHash(pin);
+            const pinData = await createPinHash(pin);
             const trialClaimRef = db.collection('trialClaims').doc(hashInstallId(installId));
             const deviceTrialClaimRef = db.collection('deviceTrialClaims').doc(hashInstallId(trialDeviceId));
 
@@ -809,7 +843,7 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 if (!racedUser.exists) return res.status(409).json({ success: false, message: 'Account creation conflict. Please try again.' });
                 userData = racedUser.data() || {};
                 if (userData.pinHash && userData.pinSalt) {
-                    if (!verifyPinHash(pin, userData.pinSalt, userData.pinHash)) {
+                    if (!(await verifyPinHash(pin, userData.pinSalt, userData.pinHash))) {
                         const failure = await recordPinFailure(db, phone);
                         if (failure.locked) return res.status(429).json({ success: false, message: `Too many wrong PIN attempts. Try again in ${PIN_LOCK_MINUTES} minutes.` });
                         return res.status(401).json({ success: false, message: 'Invalid mobile number or PIN.' });
@@ -818,8 +852,15 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                 trialAdded = false; isNewUser = false;
             } else {
                 trialAdded = transactionResult.trialGranted;
-                const createdUserDoc = await userRef.get();
-                userData = createdUserDoc.data() || {};
+                userData = {
+                    phone,
+                    firebaseUid: driverFirebaseUid,
+                    activePlan: PLAN_TYPE_NONE,
+                    planExpiry: trialAdded ? (Date.now() + TRIAL_DURATION_MS) : 0,
+                    totalRides: 0,
+                    referralCode: newReferralCode,
+                    referralCount: 0
+                };
 
                 if (referralApplied && referralLedgerRef) {
                     await db.runTransaction(async transaction => {
@@ -839,8 +880,6 @@ app.post('/api/auth/login', verifyAppCheck, async (req, res) => {
                         transaction.update(referralLedgerRef, { status: 'rewarded', rewardedAt: admin.firestore.FieldValue.serverTimestamp() });
                     });
                 }
-                const finalUserDoc = await userRef.get();
-                userData = finalUserDoc.data() || {};
             }
         }
 
@@ -965,12 +1004,13 @@ app.post('/api/payment/payu/create-order', verifyFirebaseToken, async (req, res)
         const params = { key: cfg.key, txnid, amount, productinfo, firstname: firstName, email, phone, udf1: phone, udf2: '', udf3: '', udf4: '', udf5: '', surl: `${baseUrl}/api/payment/payu/return`, furl: `${baseUrl}/api/payment/payu/return`, curl: `${baseUrl}/api/payment/payu/return` };
         params.hash = generatePayURequestHash(params, cfg.salt);
         
-        // 🔥 OPTIMIZATION: Don't await Firestore. Respond instantly.
-        getDB().collection('paymentOrders').doc(`payu_${txnid}`).set({
+        // Persist the order before opening PayU. This prevents a fast PayU
+        // callback from arriving before the order exists in Firestore.
+        await getDB().collection('paymentOrders').doc(`payu_${txnid}`).create({
             orderId: txnid, txnid, paymentGateway: 'PAYU', phone, amountRupees, amountPaise: amountRupees * 100,
             planType: planConfig.type, planDurationMs: planConfig.durationMs, currency: 'INR', status: 'created',
             createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }).catch(err => console.error('Error saving PayU order:', err));
+        });
 
         return res.json({ success: true, provider: 'PAYU', txnid, orderId: txnid, amount, currency: 'INR', planType: planConfig.type, planDurationMs: planConfig.durationMs, checkoutUrl: cfg.paymentUrl, formData: params });
     } catch (error) { return res.status(500).json({ success: false, message: error.message || 'Unable to create PayU order.' }); }
@@ -1062,12 +1102,13 @@ app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
             partial_payment: false, notes: { app: 'Driver Ride Picker', phone, planType, planDurationMs: String(planDurationMs) }
         });
 
-        // 🔥 OPTIMIZATION: Don't await Firestore. Respond instantly.
-        getDB().collection('paymentOrders').doc(order.id).set({
+        // Persist the order before returning it to the app. Payment verification
+        // must never race a background Firestore write.
+        await getDB().collection('paymentOrders').doc(order.id).create({
             orderId: order.id, phone, amountRupees, amountPaise: amountRupees * 100,
             planType, planDurationMs, currency: 'INR', status: 'created',
             receipt, createdAt: admin.firestore.FieldValue.serverTimestamp()
-        }).catch(err => console.error('Error saving Razorpay order:', err));
+        });
 
         return res.json({ success: true, keyId: process.env.RAZORPAY_KEY_ID, orderId: order.id, amount: order.amount, currency: order.currency, planType, planDurationMs });
     } catch (error) { return res.status(500).json({ success: false, message: error.message || 'Unable to create Razorpay order.' }); }
@@ -1094,17 +1135,28 @@ app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
         
         if (orderData.status === 'paid') return res.json({ success: true, alreadyProcessed: true, planType: orderData.planType || PLAN_TYPE_NONE, message: 'Payment already processed.' });
 
-        let paymentStatus = 'captured'; let paymentAmount = Number(orderData.amountPaise);
+        let paymentStatus;
+        let paymentAmount;
 
         try {
-            const razorpay = getRazorpay(); 
+            const razorpay = getRazorpay();
             const payment = await razorpay.payments.fetch(paymentId);
             paymentStatus = String(payment.status || '').toLowerCase();
             paymentAmount = Number(payment.amount || 0);
-            if (String(payment.order_id || '') !== orderId) { return res.status(400).json({ success: false, message: 'Payment order ID mismatch.' }); }
-        } catch (fetchError) { console.error('Razorpay fetch failed, relying on signature validation:', fetchError.message); }
+            if (String(payment.order_id || '') !== orderId) {
+                return res.status(400).json({ success: false, message: 'Payment order ID mismatch.' });
+            }
+        } catch (fetchError) {
+            console.error('RAZORPAY PAYMENT FETCH ERROR:', fetchError.message || fetchError);
+            // Do not activate a plan when provider status/amount cannot be verified.
+            return res.status(503).json({
+                success: false,
+                pending: true,
+                message: 'Payment verification is temporarily delayed. Please check payment status again; do not pay twice.'
+            });
+        }
 
-        if (paymentStatus !== 'captured' && paymentStatus !== 'authorized') return res.status(400).json({ success: false, message: `Payment not successful. Status: ${paymentStatus}` });
+        if (paymentStatus !== 'captured' && paymentStatus !== 'authorized') return res.status(400).json({ success: false, message: `Payment not successful. Status: ${paymentStatus || 'unknown'}` });
         if (paymentAmount && Number(orderData.amountPaise) && paymentAmount !== Number(orderData.amountPaise)) return res.status(400).json({ success: false, message: 'Payment amount mismatch.' });
 
         const result = await processPlanActivation(orderId, paymentId, 'RAZORPAY');
