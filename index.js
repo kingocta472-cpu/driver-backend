@@ -147,6 +147,32 @@ function getDB() {
 // ============================================================
 let razorpayClientCache = { keyId: '', keySecret: '', client: null };
 
+function withTimeout(promise, timeoutMs, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms.`)), timeoutMs);
+    });
+    return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
+
+function isAlreadyExistsError(error) {
+    return error && (error.code === 6 || error.code === 'already-exists' || error.code === 'ALREADY_EXISTS');
+}
+
+async function createOrReadPaymentOrder(orderRef, data, validateExisting) {
+    try {
+        await orderRef.create(data);
+        return data;
+    } catch (error) {
+        if (!isAlreadyExistsError(error)) throw error;
+        const existing = await orderRef.get();
+        if (!existing.exists) throw error;
+        const existingData = existing.data() || {};
+        validateExisting(existingData);
+        return existingData;
+    }
+}
+
 function getRazorpay() {
     const keyId = String(process.env.RAZORPAY_KEY_ID || '').trim();
     const keySecret = String(process.env.RAZORPAY_KEY_SECRET || '').trim();
@@ -323,6 +349,122 @@ async function processPlanActivation(orderId, paymentId, paymentGateway) {
     
     userByUidCache.clear();
     return { alreadyProcessed: false, planType, planExpiry: newPlanExpiry };
+}
+
+// ============================================================
+// VERIFIED PAYMENT ORDER RECOVERY
+// Payment checkout creation must not wait for a Firestore write.
+// Unpaid orders are reconstructed from signed/provider-verified metadata
+// only when a payment is being verified or a trusted webhook arrives.
+// ============================================================
+async function ensureRazorpayOrderRecord(orderId, expectedPhone = '', suppliedOrder = null) {
+    if (!orderId || typeof orderId !== 'string') throw new Error('Invalid Razorpay order reference.');
+    const db = getDB();
+    const orderRef = db.collection('paymentOrders').doc(orderId);
+    const existing = await orderRef.get();
+    if (existing.exists) {
+        const data = existing.data() || {};
+        if (expectedPhone && normalizePhone(data.phone) !== normalizePhone(expectedPhone)) {
+            throw new Error('Payment order does not belong to this driver.');
+        }
+        return data;
+    }
+
+    const razorpayOrder = suppliedOrder || await withTimeout(
+        getRazorpay().orders.fetch(orderId), 12000, 'Razorpay order lookup'
+    );
+    if (String(razorpayOrder.id || '') !== orderId) throw new Error('Razorpay order reference mismatch.');
+    if (String(razorpayOrder.currency || '').toUpperCase() !== 'INR') throw new Error('Unsupported Razorpay order currency.');
+
+    const amountPaise = Number(razorpayOrder.amount || 0);
+    if (!Number.isSafeInteger(amountPaise) || amountPaise <= 0 || amountPaise % 100 !== 0) {
+        throw new Error('Invalid Razorpay order amount.');
+    }
+    const amountRupees = amountPaise / 100;
+    const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
+    const notes = razorpayOrder.notes || {};
+    const phone = normalizePhone(notes.phone || '');
+    const planType = String(notes.planType || '').toUpperCase();
+    const planDurationMs = Number(notes.planDurationMs || 0);
+
+    if (!planConfig || !phone || String(notes.app || '') !== 'Driver Ride Picker') {
+        throw new Error('Razorpay order metadata could not be verified.');
+    }
+    if (expectedPhone && phone !== normalizePhone(expectedPhone)) {
+        throw new Error('Payment order does not belong to this driver.');
+    }
+    if (planType !== planConfig.type || planDurationMs !== planConfig.durationMs) {
+        throw new Error('Razorpay plan metadata mismatch.');
+    }
+
+    const data = {
+        orderId,
+        phone,
+        amountRupees,
+        amountPaise,
+        planType: planConfig.type,
+        planDurationMs: planConfig.durationMs,
+        currency: 'INR',
+        status: 'created',
+        receipt: String(razorpayOrder.receipt || ''),
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        recoveredFromProvider: true
+    };
+    return createOrReadPaymentOrder(orderRef, data, existingData => {
+        if (normalizePhone(existingData.phone) !== phone ||
+            Number(existingData.amountPaise) !== amountPaise ||
+            String(existingData.planType || '').toUpperCase() !== planConfig.type) {
+            throw new Error('Existing Razorpay order data does not match provider records.');
+        }
+    });
+}
+
+async function ensurePayUOrderRecord(txnid, trustedTransaction, expectedPhone = '') {
+    if (!/^[A-Za-z0-9_-]{8,40}$/.test(String(txnid || ''))) throw new Error('Invalid PayU transaction reference.');
+    const db = getDB();
+    const orderRef = db.collection('paymentOrders').doc(`payu_${txnid}`);
+    const existing = await orderRef.get();
+    if (existing.exists) {
+        const data = existing.data() || {};
+        if (expectedPhone && normalizePhone(data.phone) !== normalizePhone(expectedPhone)) {
+            throw new Error('PayU order does not belong to this driver.');
+        }
+        return data;
+    }
+
+    const verifiedTxnId = String(trustedTransaction.txnid || txnid);
+    const phone = normalizePhone(trustedTransaction.udf1 || trustedTransaction.phone || '');
+    const amount = Number(trustedTransaction.amount || trustedTransaction.transaction_amount || 0);
+    const amountRupees = Number(amount.toFixed(2));
+    const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
+    if (verifiedTxnId !== txnid || !phone || !planConfig) {
+        throw new Error('PayU transaction metadata could not be verified.');
+    }
+    if (expectedPhone && phone !== normalizePhone(expectedPhone)) {
+        throw new Error('PayU transaction does not belong to this driver.');
+    }
+
+    const data = {
+        orderId: txnid,
+        txnid,
+        paymentGateway: 'PAYU',
+        phone,
+        amountRupees,
+        amountPaise: amountRupees * 100,
+        planType: planConfig.type,
+        planDurationMs: planConfig.durationMs,
+        currency: 'INR',
+        status: 'created',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        recoveredFromProvider: true
+    };
+    return createOrReadPaymentOrder(orderRef, data, existingData => {
+        if (normalizePhone(existingData.phone) !== phone ||
+            Number(existingData.amountRupees) !== amountRupees ||
+            String(existingData.planType || '').toUpperCase() !== planConfig.type) {
+            throw new Error('Existing PayU order data does not match provider records.');
+        }
+    });
 }
 
 // ============================================================
@@ -974,19 +1116,34 @@ app.post('/api/payment/webhook/razorpay', async (req, res) => {
     try {
         const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
         if (!secret) { console.warn('RAZORPAY_WEBHOOK_SECRET is not set.'); return res.status(200).send('Webhook secret not configured'); }
-        const signature = req.headers['x-razorpay-signature'];
+        const signature = String(req.headers['x-razorpay-signature'] || '');
         const expectedSignature = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
-        if (expectedSignature !== signature) { console.error('Razorpay webhook signature mismatch.'); return res.status(400).send('Invalid signature'); }
+        if (!signature || expectedSignature.length !== signature.length ||
+            !crypto.timingSafeEqual(Buffer.from(expectedSignature, 'utf8'), Buffer.from(signature, 'utf8'))) {
+            console.error('Razorpay webhook signature mismatch.');
+            return res.status(400).send('Invalid signature');
+        }
         const event = req.body.event;
         if (event === 'payment.captured' || event === 'order.paid') {
-            const paymentEntity = req.body.payload.payment.entity;
-            await processPlanActivation(paymentEntity.order_id, paymentEntity.id, 'RAZORPAY_WEBHOOK');
+            const paymentEntity = req.body?.payload?.payment?.entity || null;
+            const orderEntity = req.body?.payload?.order?.entity || null;
+            const orderId = String(paymentEntity?.order_id || orderEntity?.id || '').trim();
+            const paymentId = String(paymentEntity?.id || '').trim();
+            if (!orderId || !paymentId) return res.status(200).send('Payment details not present; ignored');
+            // Recovery handles the race where checkout returned before the order
+            // record was created; it trusts only the signed webhook + Razorpay order.
+            await ensureRazorpayOrderRecord(orderId);
+            await processPlanActivation(orderId, paymentId, 'RAZORPAY_WEBHOOK');
         }
         return res.status(200).send('OK');
-    } catch (error) { console.error('RAZORPAY WEBHOOK ERROR:', error.message); return res.status(500).send('Webhook error'); }
+    } catch (error) {
+        console.error('RAZORPAY WEBHOOK ERROR:', error.message || error);
+        return res.status(500).send('Webhook error');
+    }
 });
 
 app.post('/api/payment/payu/create-order', verifyFirebaseToken, async (req, res) => {
+    const startedAt = Date.now();
     try {
         const phone = getAuthenticatedPhone(req);
         const amountRupees = Number(req.body.amountRupees);
@@ -1003,66 +1160,124 @@ app.post('/api/payment/payu/create-order', verifyFirebaseToken, async (req, res)
         const productinfo = `Driver Ride Picker ${planConfig.label}`;
         const params = { key: cfg.key, txnid, amount, productinfo, firstname: firstName, email, phone, udf1: phone, udf2: '', udf3: '', udf4: '', udf5: '', surl: `${baseUrl}/api/payment/payu/return`, furl: `${baseUrl}/api/payment/payu/return`, curl: `${baseUrl}/api/payment/payu/return` };
         params.hash = generatePayURequestHash(params, cfg.salt);
-        
-        // Persist the order before opening PayU. This prevents a fast PayU
-        // callback from arriving before the order exists in Firestore.
-        await getDB().collection('paymentOrders').doc(`payu_${txnid}`).create({
-            orderId: txnid, txnid, paymentGateway: 'PAYU', phone, amountRupees, amountPaise: amountRupees * 100,
-            planType: planConfig.type, planDurationMs: planConfig.durationMs, currency: 'INR', status: 'created',
-            createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
 
+        // PayU checkout parameters are generated locally. Do not block gateway
+        // launch on Firestore: the signed PayU return / verification API will
+        // create the durable order record before any plan activation.
+        console.info('PAYU_CHECKOUT_READY', { elapsedMs: Date.now() - startedAt });
         return res.json({ success: true, provider: 'PAYU', txnid, orderId: txnid, amount, currency: 'INR', planType: planConfig.type, planDurationMs: planConfig.durationMs, checkoutUrl: cfg.paymentUrl, formData: params });
-    } catch (error) { return res.status(500).json({ success: false, message: error.message || 'Unable to create PayU order.' }); }
+    } catch (error) {
+        console.error('PAYU CREATE ORDER ERROR:', error.message || error);
+        return res.status(500).json({ success: false, message: error.message || 'Unable to create PayU order.' });
+    }
 });
 
 app.post('/api/payment/payu/return', async (req, res) => {
-    const body = req.body || {}; const txnid = String(body.txnid || '').trim();
+    const body = req.body || {};
+    const txnid = String(body.txnid || '').trim();
     const failPage = (message) => res.status(200).type('html').send(`<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment Status</title><body style="font-family:Arial;padding:24px;text-align:center"><h2>Payment not confirmed</h2><p>${String(message).replace(/[<>]/g, '')}</p><p>Return to Driver Ride Picker and check your plan status.</p></body></html>`);
     const successPage = () => res.status(200).type('html').send('<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Payment Verified</title><body style="font-family:Arial;padding:24px;text-align:center"><h2>Payment verified</h2><p>Your plan has been activated. Return to Driver Ride Picker and refresh your balance.</p></body></html>');
     try {
         if (!txnid) return failPage('Transaction reference missing.');
         const cfg = getPayUConfig();
         if (String(body.key || '') !== cfg.key || !verifyPayUResponseHash(body, cfg.salt)) return failPage('Payment response could not be authenticated.');
+
         const orderRef = getDB().collection('paymentOrders').doc(`payu_${txnid}`);
-        const orderSnapshot = await orderRef.get();
-        if (!orderSnapshot.exists) return failPage('Payment order not found.');
-        const orderData = orderSnapshot.data() || {};
-        if (String(body.status || '').toLowerCase() !== 'success') { await orderRef.set({ status: 'failed', payuStatus: String(body.status || 'unknown'), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }); return failPage('The payment provider reported an unsuccessful payment.'); }
-        if (normalizePhone(body.udf1 || '') !== normalizePhone(orderData.phone || '')) return failPage('Payment driver reference mismatch.');
-        if (Number(Number(body.amount).toFixed(2)) !== Number(Number(orderData.amountRupees).toFixed(2))) return failPage('Payment amount mismatch.');
+        if (String(body.status || '').toLowerCase() !== 'success') {
+            const existing = await orderRef.get();
+            if (existing.exists) await orderRef.set({ status: 'failed', payuStatus: String(body.status || 'unknown'), updatedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+            return failPage('The payment provider reported an unsuccessful payment.');
+        }
+
+        const signedPhone = normalizePhone(body.udf1 || '');
+        const signedAmount = Number(Number(body.amount).toFixed(2));
+        const planConfig = PLAN_CONFIG_BY_AMOUNT[signedAmount];
+        if (!signedPhone || !planConfig) return failPage('Payment driver or plan details could not be verified.');
+
+        let orderData;
+        try {
+            orderData = await ensurePayUOrderRecord(txnid, {
+                txnid,
+                udf1: signedPhone,
+                amount: signedAmount
+            }, signedPhone);
+        } catch (orderError) {
+            console.error('PAYU ORDER RECOVERY ERROR:', orderError.message || orderError);
+            return failPage('Payment order could not be securely recovered.');
+        }
+
+        if (normalizePhone(orderData.phone) !== signedPhone || Number(orderData.amountRupees) !== signedAmount) return failPage('Payment amount or driver reference mismatch.');
         if (orderData.status === 'paid') return successPage();
-        
-        let verifiedStatus = String(body.status || '').toLowerCase(); let verifiedAmount = Number(body.amount || 0); let mihpayid = String(body.mihpayid || '');
-        try { const verified = await verifyPayUTransaction(txnid, cfg); if (verified) { verifiedStatus = String(verified.status || '').toLowerCase(); verifiedAmount = Number(verified.amount || verified.transaction_amount || 0); mihpayid = String(verified.mihpayid || mihpayid); } } catch (e) { console.error('PayU verify API failed, relying on response hash:', e.message); }
+
+        let verifiedStatus = String(body.status || '').toLowerCase();
+        let verifiedAmount = Number(body.amount || 0);
+        let mihpayid = String(body.mihpayid || '');
+        try {
+            const verified = await verifyPayUTransaction(txnid, cfg);
+            verifiedStatus = String(verified.status || '').toLowerCase();
+            verifiedAmount = Number(verified.amount || verified.transaction_amount || 0);
+            mihpayid = String(verified.mihpayid || mihpayid);
+            if (normalizePhone(verified.udf1 || signedPhone) !== signedPhone || String(verified.txnid || txnid) !== txnid) {
+                return failPage('PayU transaction ownership could not be verified.');
+            }
+        } catch (e) {
+            console.error('PayU verify API delayed; authenticated response hash retained:', e.message || e);
+        }
         if (verifiedStatus !== 'success') return failPage('PayU verification did not confirm success status.');
         if (Number(verifiedAmount.toFixed(2)) !== Number(Number(orderData.amountRupees).toFixed(2))) return failPage('PayU verification amount mismatch.');
-        
+
         await processPlanActivation(`payu_${txnid}`, mihpayid, 'PAYU');
         return successPage();
-    } catch (error) { console.error('PAYU RETURN/VERIFY ERROR:', error.message || error); return failPage('We could not verify this payment yet.'); }
+    } catch (error) {
+        console.error('PAYU RETURN/VERIFY ERROR:', error.message || error);
+        return failPage('We could not verify this payment yet.');
+    }
 });
 
 app.post('/api/payment/payu/verify', verifyFirebaseToken, async (req, res) => {
     try {
-        const phone = getAuthenticatedPhone(req); const txnid = String(req.body.txnid || '').trim();
+        const phone = getAuthenticatedPhone(req);
+        const txnid = String(req.body.txnid || '').trim();
         if (!phone || !/^[A-Za-z0-9_-]{8,40}$/.test(txnid)) return res.status(400).json({ success: false, message: 'Valid transaction reference is required.' });
-        const db = getDB(); const orderRef = db.collection('paymentOrders').doc(`payu_${txnid}`);
+
+        const db = getDB();
+        const orderRef = db.collection('paymentOrders').doc(`payu_${txnid}`);
         const orderSnapshot = await orderRef.get();
-        if (!orderSnapshot.exists) return res.status(404).json({ success: false, message: 'Payment order not found.' });
-        const orderData = orderSnapshot.data() || {};
-        if (normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
-        if (orderData.status === 'paid') return res.json({ success: true, alreadyProcessed: true, provider: 'PAYU', planType: orderData.planType || PLAN_TYPE_NONE, planExpiry: Number(orderData.planExpiry || 0), message: 'Payment already processed.' });
-        
+        let orderData = orderSnapshot.exists ? (orderSnapshot.data() || {}) : null;
+        if (orderData && normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
+        if (orderData?.status === 'paid') return res.json({ success: true, alreadyProcessed: true, provider: 'PAYU', planType: orderData.planType || PLAN_TYPE_NONE, planExpiry: Number(orderData.planExpiry || 0), message: 'Payment already processed.' });
+
         const cfg = getPayUConfig();
-        let verifiedStatus = 'pending'; let verifiedAmount = 0; let mihpayid = '';
-        try { const verified = await verifyPayUTransaction(txnid, cfg); verifiedStatus = String(verified.status || '').toLowerCase(); verifiedAmount = Number(verified.amount || verified.transaction_amount || 0); mihpayid = String(verified.mihpayid || ''); } catch (e) { return res.status(202).json({ success: false, alreadyProcessed: false, provider: 'PAYU', status: 'pending', planType: PLAN_TYPE_NONE, planExpiry: 0, message: 'Payment verification pending.' }); }
+        let verified;
+        try {
+            verified = await verifyPayUTransaction(txnid, cfg);
+        } catch (error) {
+            return res.status(202).json({ success: false, alreadyProcessed: false, provider: 'PAYU', status: 'pending', planType: PLAN_TYPE_NONE, planExpiry: 0, message: 'Payment verification pending. Please check again shortly.' });
+        }
+        const verifiedStatus = String(verified.status || '').toLowerCase();
         if (verifiedStatus !== 'success') return res.status(202).json({ success: false, alreadyProcessed: false, provider: 'PAYU', status: verifiedStatus || 'pending', planType: PLAN_TYPE_NONE, planExpiry: 0, message: 'Payment is not confirmed yet.' });
-        if (Number(verifiedAmount.toFixed(2)) !== Number(Number(orderData.amountRupees).toFixed(2)) || String(verified.txnid || txnid) !== txnid) return res.status(400).json({ success: false, message: 'PayU transaction amount or reference mismatch.' });
-        
-        const result = await processPlanActivation(`payu_${txnid}`, mihpayid, 'PAYU');
+        if (String(verified.txnid || txnid) !== txnid) return res.status(400).json({ success: false, message: 'PayU transaction reference mismatch.' });
+
+        const verifiedPhone = normalizePhone(verified.udf1 || verified.phone || '');
+        if (!verifiedPhone || verifiedPhone !== phone) return res.status(403).json({ success: false, message: 'PayU transaction ownership could not be verified.' });
+
+        const verifiedAmount = Number(verified.amount || verified.transaction_amount || 0);
+        const amountRupees = Number(verifiedAmount.toFixed(2));
+        const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
+        if (!planConfig) return res.status(400).json({ success: false, message: 'PayU transaction amount does not match an available plan.' });
+
+        if (!orderData) {
+            orderData = await ensurePayUOrderRecord(txnid, verified, phone);
+        } else if (Number(verifiedAmount.toFixed(2)) !== Number(Number(orderData.amountRupees).toFixed(2))) {
+            return res.status(400).json({ success: false, message: 'PayU transaction amount mismatch.' });
+        }
+
+        const result = await processPlanActivation(`payu_${txnid}`, String(verified.mihpayid || ''), 'PAYU');
         return res.json({ success: true, alreadyProcessed: false, provider: 'PAYU', status: 'success', planType: result.planType, planExpiry: result.planExpiry, planExpiryIso: result.planExpiry ? new Date(result.planExpiry).toISOString() : null, message: 'Payment verified and plan activated.' });
-    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to verify PayU payment right now.' }); }
+    } catch (error) {
+        console.error('PAYU VERIFY ERROR:', error.message || error);
+        return res.status(500).json({ success: false, message: 'Unable to verify PayU payment right now.' });
+    }
 });
 
 app.get('/api/payment/payu/status/:txnid', verifyFirebaseToken, async (req, res) => {
@@ -1087,6 +1302,7 @@ app.get('/api/cron/half-hour-summary', (req, res) => { return res.status(200).js
 app.post('/api/admin/telegram/test', (req, res) => { if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' }); return res.status(200).json({ success: true, sent: false, disabled: true }); });
 
 app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
+    const startedAt = Date.now();
     try {
         const phone = getAuthenticatedPhone(req);
         const amountRupees = Number(req.body.amountRupees);
@@ -1094,74 +1310,85 @@ app.post('/api/payment/create-order', verifyFirebaseToken, async (req, res) => {
         const planConfig = PLAN_CONFIG_BY_AMOUNT[amountRupees];
         if (!planConfig) return res.status(400).json({ success: false, message: 'Invalid plan amount.' });
 
-        const planType = planConfig.type; const planDurationMs = planConfig.durationMs;
-        const receipt = generateReceipt(); const razorpay = getRazorpay();
+        const planType = planConfig.type;
+        const planDurationMs = planConfig.durationMs;
+        const receipt = generateReceipt();
+        const razorpay = getRazorpay();
 
-        const order = await razorpay.orders.create({
-            amount: amountRupees * 100, currency: 'INR', receipt,
-            partial_payment: false, notes: { app: 'Driver Ride Picker', phone, planType, planDurationMs: String(planDurationMs) }
-        });
+        // Critical path: call Razorpay with a bounded wait, but do not place a
+        // Firestore write between order creation and returning checkout details.
+        const order = await withTimeout(razorpay.orders.create({
+            amount: amountRupees * 100,
+            currency: 'INR',
+            receipt,
+            partial_payment: false,
+            notes: { app: 'Driver Ride Picker', phone, planType, planDurationMs: String(planDurationMs) }
+        }), 12000, 'Razorpay order creation');
 
-        // Persist the order before returning it to the app. Payment verification
-        // must never race a background Firestore write.
-        await getDB().collection('paymentOrders').doc(order.id).create({
-            orderId: order.id, phone, amountRupees, amountPaise: amountRupees * 100,
-            planType, planDurationMs, currency: 'INR', status: 'created',
-            receipt, createdAt: admin.firestore.FieldValue.serverTimestamp()
-        });
+        if (!order?.id || Number(order.amount) !== amountRupees * 100 || String(order.currency).toUpperCase() !== 'INR') {
+            throw new Error('Razorpay returned incomplete order details.');
+        }
 
+        // Firestore is intentionally deferred until signed payment verification
+        // or a signed webhook. The record is reconstructed from Razorpay's own
+        // order notes, amount and currency before any plan can be activated.
+        console.info('RAZORPAY_CHECKOUT_READY', { elapsedMs: Date.now() - startedAt });
         return res.json({ success: true, keyId: process.env.RAZORPAY_KEY_ID, orderId: order.id, amount: order.amount, currency: order.currency, planType, planDurationMs });
-    } catch (error) { return res.status(500).json({ success: false, message: error.message || 'Unable to create Razorpay order.' }); }
+    } catch (error) {
+        console.error('RAZORPAY CREATE ORDER ERROR:', error.message || error);
+        const timedOut = /timed out/i.test(String(error.message || ''));
+        return res.status(timedOut ? 504 : 502).json({ success: false, message: timedOut ? 'Razorpay is taking too long to respond. Please retry once; no payment has been started.' : (error.message || 'Unable to create Razorpay order.') });
+    }
 });
 
 app.post('/api/payment/verify', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = getAuthenticatedPhone(req);
-        const orderId = String(req.body.orderId || '').trim(); 
-        const paymentId = String(req.body.paymentId || '').trim(); 
+        const orderId = String(req.body.orderId || '').trim();
+        const paymentId = String(req.body.paymentId || '').trim();
         const signature = String(req.body.signature || '').trim();
-        
         if (!phone || !orderId || !paymentId || !signature) return res.status(400).json({ success: false, message: 'Payment data incomplete.' });
 
-        const db = getDB(); 
-        const orderRef = db.collection('paymentOrders').doc(orderId); 
-        const orderSnapshot = await orderRef.get();
-        
-        if (!orderSnapshot.exists) return res.status(404).json({ success: false, message: 'Payment order not found.' });
-        const orderData = orderSnapshot.data() || {};
-        if (normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
-        
         if (!verifyRazorpaySignature(orderId, paymentId, signature)) return res.status(400).json({ success: false, message: 'Invalid signature.' });
-        
-        if (orderData.status === 'paid') return res.json({ success: true, alreadyProcessed: true, planType: orderData.planType || PLAN_TYPE_NONE, message: 'Payment already processed.' });
 
-        let paymentStatus;
-        let paymentAmount;
+        const orderRef = getDB().collection('paymentOrders').doc(orderId);
+        const orderSnapshot = await orderRef.get();
+        let orderData = orderSnapshot.exists ? (orderSnapshot.data() || {}) : null;
+        if (orderData && normalizePhone(orderData.phone) !== phone) return res.status(403).json({ success: false, message: 'Payment order mismatch.' });
+        if (orderData?.status === 'paid') return res.json({ success: true, alreadyProcessed: true, planType: orderData.planType || PLAN_TYPE_NONE, planExpiry: Number(orderData.planExpiry || 0), message: 'Payment already processed.' });
 
+        let payment;
         try {
-            const razorpay = getRazorpay();
-            const payment = await razorpay.payments.fetch(paymentId);
-            paymentStatus = String(payment.status || '').toLowerCase();
-            paymentAmount = Number(payment.amount || 0);
-            if (String(payment.order_id || '') !== orderId) {
-                return res.status(400).json({ success: false, message: 'Payment order ID mismatch.' });
-            }
+            payment = await withTimeout(getRazorpay().payments.fetch(paymentId), 12000, 'Razorpay payment verification');
         } catch (fetchError) {
             console.error('RAZORPAY PAYMENT FETCH ERROR:', fetchError.message || fetchError);
-            // Do not activate a plan when provider status/amount cannot be verified.
-            return res.status(503).json({
-                success: false,
-                pending: true,
-                message: 'Payment verification is temporarily delayed. Please check payment status again; do not pay twice.'
-            });
+            return res.status(503).json({ success: false, pending: true, message: 'Payment verification is temporarily delayed. Please check payment status again; do not pay twice.' });
         }
 
+        if (String(payment.order_id || '') !== orderId) return res.status(400).json({ success: false, message: 'Payment order ID mismatch.' });
+        const paymentStatus = String(payment.status || '').toLowerCase();
+        const paymentAmount = Number(payment.amount || 0);
         if (paymentStatus !== 'captured' && paymentStatus !== 'authorized') return res.status(400).json({ success: false, message: `Payment not successful. Status: ${paymentStatus || 'unknown'}` });
+
+        // If the fast checkout path did not create a Firestore document yet,
+        // rebuild it from the provider order's signed notes and verify ownership.
+        if (!orderData) {
+            try {
+                orderData = await ensureRazorpayOrderRecord(orderId, phone);
+            } catch (recoveryError) {
+                console.error('RAZORPAY ORDER RECOVERY ERROR:', recoveryError.message || recoveryError);
+                return res.status(503).json({ success: false, pending: true, message: 'Payment received. Order details are being verified; do not pay again. Please check your plan status shortly.' });
+            }
+        }
+
         if (paymentAmount && Number(orderData.amountPaise) && paymentAmount !== Number(orderData.amountPaise)) return res.status(400).json({ success: false, message: 'Payment amount mismatch.' });
 
         const result = await processPlanActivation(orderId, paymentId, 'RAZORPAY');
         return res.json({ success: true, alreadyProcessed: false, planType: result.planType, planExpiry: result.planExpiry, planExpiryIso: new Date(result.planExpiry).toISOString(), message: `${result.planType} plan activated successfully.` });
-    } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' }); }
+    } catch (error) {
+        console.error('RAZORPAY PAYMENT VERIFY ERROR:', error.message || error);
+        return res.status(error.statusCode || 500).json({ success: false, message: error.message || 'Unable to verify payment.' });
+    }
 });
 
 app.post('/api/telegram/webhook', (req, res) => { return res.status(200).send('OK'); });
