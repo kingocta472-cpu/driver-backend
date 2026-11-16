@@ -631,10 +631,29 @@ const DEFAULT_RIDE_BOT_CONFIG = {
     },
     global: { bot_enabled: true, auto_accept_enabled: true, max_ride_cycle_duration_ms: 8000, maxRideCycleDurationMs: 8000, watchdog_interval_ms: 2000, watchdogIntervalMs: 2000, config_refresh_interval_ms: 300000, configRefreshIntervalMs: 300000, health_check_interval_ms: 300000, healthCheckIntervalMs: 300000, node_null_delay_ms: 20, nodeNullDelayMs: 20, debounce_normal_ms: 5, debounceNormalMs: 5, debounce_slow_ms: 20, debounceSlowMs: 20, location_min_time_ms: 5000, locationMinTimeMs: 5000, location_min_distance_m: 50, locationMinDistanceM: 50, plan_offline_grace_ms: 1800000, planOfflineGraceMs: 1800000 },
     controls: { bot_enabled: true, auto_accept_enabled: true },
+    // Conservative remote timing profile.
+    // Strategy order remains: normal (original/default) -> medium (fallback) -> high_speed (last fallback).
+    // Both camelCase and snake_case keys are sent for compatibility with existing APK builds.
     strategies: {
-        normal: { attempts: 10, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 30, verify_delay_ms: 30, tapMode: 'CENTER' },
-        medium: { attempts: 15, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 25, verify_delay_ms: 25, tapMode: 'GHOST' },
-        high_speed: { attempts: 15, attemptsSlow: 15, attempts_slow: 15, tapIntervalMs: 5, tap_interval_ms: 5, verifyDelayMs: 20, verify_delay_ms: 20, verifyDelaySlowMs: 40, verify_delay_slow_ms: 40, tapMode: 'GHOST' }
+        normal: {
+            attempts: 6,
+            tapIntervalMs: 45, tap_interval_ms: 45,
+            verifyDelayMs: 60, verify_delay_ms: 60,
+            tapMode: 'CENTER'
+        },
+        medium: {
+            attempts: 10,
+            tapIntervalMs: 45, tap_interval_ms: 45,
+            verifyDelayMs: 60, verify_delay_ms: 60,
+            tapMode: 'CENTER'
+        },
+        high_speed: {
+            attempts: 15, attemptsSlow: 15, attempts_slow: 15,
+            tapIntervalMs: 30, tap_interval_ms: 30,
+            verifyDelayMs: 60, verify_delay_ms: 60,
+            verifyDelaySlowMs: 80, verify_delay_slow_ms: 80,
+            tapMode: 'GHOST'
+        }
     },
     filters: { enabled: true, keyword_mode: "ANY", minimum_fare: 0, minimumFare: 0, maximum_fare: 0, maximumFare: 0, maximum_pickup_distance_km: 0, maximumPickupDistanceKm: 0, maximum_drop_distance_km: 0, maximumDropDistanceKm: 0, maximum_trip_distance_km: 0, maximumTripDistanceKm: 0, minimum_trip_distance_km: 0, minimumTripDistanceKm: 0, work_zone_radius_km: 5, workZoneRadiusKm: 5, allowed_vehicles: ["AUTO", "CAR", "BIKE"], allowedVehicles: ["AUTO", "CAR", "BIKE"], target_areas: [], targetAreas: [], blocked_areas: [], blockedAreas: [], required_keywords: [], requiredKeywords: [], blocked_keywords: ["close drawer", "earnings", "trips", "preferences", "plans", "benefits", "aarokya", "store", "help", "open data", "about", "google maps", "bottom sheet backdrop", "bottom sheet", "permissions required", "draw over other apps", "receive ride requests when the app is", "1 order", "go to home", "orders missed", "you missed the order", "sorry, this order was accepted by another captain", "confirm your detected location", "confirm google map", "go to location"], blockedKeywords: ["close drawer", "earnings", "trips", "preferences", "plans", "benefits", "aarokya", "store", "help", "open data", "about", "google maps", "bottom sheet backdrop", "bottom sheet", "permissions required", "draw over other apps", "receive ride requests when the app is", "1 order", "go to home", "orders missed", "you missed the order", "sorry, this order was accepted by another captain", "confirm your detected location", "confirm google map", "go to location"] }
 };
@@ -649,6 +668,38 @@ function normalizeRideBotConfig(config) {
     const safeWatchdog = Number.isFinite(configuredWatchdog) ? Math.min(15000, Math.max(500, configuredWatchdog)) : 2000;
     globalConfig.max_ride_cycle_duration_ms = safeCycle; globalConfig.maxRideCycleDurationMs = safeCycle;
     globalConfig.watchdog_interval_ms = safeWatchdog; globalConfig.watchdogIntervalMs = safeWatchdog;
+
+    // Normalize strategy timing on the server so old Redis overrides cannot
+    // re-introduce extremely short 5-20ms tap/verification loops.
+    // The Android APK still decides whether and how it executes these strategies.
+    if (!normalized.strategies || typeof normalized.strategies !== 'object' || Array.isArray(normalized.strategies)) {
+        normalized.strategies = {};
+    }
+
+    const strategyProfiles = {
+        normal: {
+            attempts: 6, tapIntervalMs: 45, tap_interval_ms: 45,
+            verifyDelayMs: 60, verify_delay_ms: 60, tapMode: 'CENTER'
+        },
+        medium: {
+            attempts: 10, tapIntervalMs: 45, tap_interval_ms: 45,
+            verifyDelayMs: 60, verify_delay_ms: 60, tapMode: 'CENTER'
+        },
+        high_speed: {
+            attempts: 15, attemptsSlow: 15, attempts_slow: 15,
+            tapIntervalMs: 30, tap_interval_ms: 30,
+            verifyDelayMs: 60, verify_delay_ms: 60,
+            verifyDelaySlowMs: 80, verify_delay_slow_ms: 80,
+            tapMode: 'GHOST'
+        }
+    };
+
+    // Keep the known Strategy 1 and Strategy 2 profiles intact.
+    // Strategy 3 remains the final fallback and is less aggressive than the old 5ms profile.
+    normalized.strategies.normal = { ...strategyProfiles.normal };
+    normalized.strategies.medium = { ...strategyProfiles.medium };
+    normalized.strategies.high_speed = { ...strategyProfiles.high_speed };
+
     return normalized;
 }
 
