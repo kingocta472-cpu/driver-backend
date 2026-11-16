@@ -74,8 +74,6 @@ const PIN_LENGTH = 6;
 const PIN_MAX_ATTEMPTS = 5;
 const PIN_LOCK_MINUTES = 15;
 
-const APP_LATEST_VERSION = '1.19.8';
-const APP_APK_URL = 'https://github.com/kingocta472-cpu/driver-backend/releases/download/v1.19.8/app-release.apk';
 const APP_UPDATE_TITLE = 'Driver Ride Picker';
 const APP_UPDATE_MESSAGE = 'Aap latest version use kar rahe hain.';
 const APP_RELEASE_NOTES = 'All app versions are supported.';
@@ -765,14 +763,38 @@ async function createUniqueReferralCode(db, userRef) {
 // ============================================================
 app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!'); });
 
+// Version-neutral update response: the backend never forces or advertises an APK update.
+// Keep this endpoint for older app builds that still call it.
 app.get('/api/app/update', (req, res) => {
     try {
         res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-        res.set('Pragma', 'no-cache'); res.set('Expires', '0');
-        const currentVersion = String(req.query.currentVersion || req.query.version || req.query.appVersion || '').trim();
-        const effectiveVersion = currentVersion || APP_LATEST_VERSION;
-        return res.json({ success: true, latestVersion: effectiveVersion, minimumVersion: '0.0.0', forceUpdate: false, updateAvailable: false, updateRequired: false, mandatory: false, updateMessage: APP_UPDATE_MESSAGE, message: APP_UPDATE_MESSAGE, title: APP_UPDATE_TITLE, releaseNotes: APP_RELEASE_NOTES, downloadUrl: APP_APK_URL, apkUrl: APP_APK_URL, currentVersion: currentVersion || null });
-    } catch (error) { return res.status(500).json({ success: false, message: 'Unable to check app update status.' }); }
+        res.set('Pragma', 'no-cache');
+        res.set('Expires', '0');
+
+        const currentVersion = String(
+            req.query.currentVersion || req.query.version || req.query.appVersion || ''
+        ).trim();
+
+        return res.status(200).json({
+            success: true,
+            latestVersion: currentVersion || '0.0.0',
+            minimumVersion: '0.0.0',
+            forceUpdate: false,
+            updateAvailable: false,
+            updateRequired: false,
+            mandatory: false,
+            updateMessage: 'Updates are not required. Your installed app version can continue.',
+            message: 'Updates are not required. Your installed app version can continue.',
+            title: APP_UPDATE_TITLE,
+            releaseNotes: 'No forced updates. Existing app versions are accepted by this update-check endpoint.',
+            downloadUrl: '',
+            apkUrl: '',
+            currentVersion: currentVersion || null
+        });
+    } catch (error) {
+        console.error('APP UPDATE CHECK ERROR:', error);
+        return res.status(500).json({ success: false, message: 'Unable to check app update status.' });
+    }
 });
 
 app.get('/api/config/ride-bot', async (req, res) => {
