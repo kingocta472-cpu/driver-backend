@@ -842,35 +842,7 @@ app.get('/api/app/update', (req, res) => {
     });
 });
 
-// APK compatibility endpoint.
-// Serve the in-code defaults from the warm-instance cache only.
-// No Redis read, config-version lookup, or remote strategy override is done here.
-// Existing strategy profiles are retained in DEFAULT_RIDE_BOT_CONFIG for old APK compatibility.
-app.get('/api/config/ride-bot', (req, res) => {
-    res.set('Cache-Control', 'public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400');
-    res.set('Access-Control-Allow-Origin', '*');
-    try {
-        if (rideConfigCache.body && Date.now() - rideConfigCache.at < RIDE_CONFIG_CACHE_MS) {
-            return res.status(200).json(rideConfigCache.body);
-        }
-        const config = normalizeRideBotConfig(DEFAULT_RIDE_BOT_CONFIG);
-        const body = {
-            version: 0,
-            updatedAt: 'static-default',
-            ...config
-        };
-        rideConfigCache = { at: Date.now(), body };
-        return res.status(200).json(body);
-    } catch (error) {
-        console.error('STATIC RIDE CONFIG ERROR:', error.message || error);
-        return res.status(200).json({
-            version: 0,
-            updatedAt: 'static-default',
-            ...normalizeRideBotConfig(DEFAULT_RIDE_BOT_CONFIG)
-        });
-    }
-});
-
+// /api/config/ride-bot removed: new APK has built-in defaults and no longer calls it.
 app.post('/api/admin/config/ride-bot', async (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
     try {
