@@ -818,7 +818,9 @@ app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!');
 // This does NOT check versions, read Redis, or force an update.
 // To stop the request itself, the APK must stop calling this endpoint.
 app.get('/api/app/update', (req, res) => {
-    res.set('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    // Static compatibility response: let Vercel's shared edge cache serve old APKs.
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=86400, stale-while-revalidate=604800');
+    res.set('Vercel-CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
     return res.status(200).json({
         success: true,
         latestVersion: '0.0.0',
@@ -841,7 +843,10 @@ app.get('/api/app/update', (req, res) => {
 // No Redis read, config-version lookup, or remote strategy override is done here.
 // Existing strategy profiles are retained in DEFAULT_RIDE_BOT_CONFIG for old APK compatibility.
 app.get('/api/config/ride-bot', (req, res) => {
-    res.set('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+    // Same static config for every driver; shared edge cache avoids invoking
+    // this function repeatedly while preserving the existing APK response body.
+    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
+    res.set('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
     res.set('Access-Control-Allow-Origin', '*');
     try {
         if (rideConfigCache.body && Date.now() - rideConfigCache.at < RIDE_CONFIG_CACHE_MS) {
