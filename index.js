@@ -30,10 +30,14 @@ app.use(express.json({ limit: '1mb', verify: (req, res, buf) => { req.rawBody = 
 // SPEED CACHES
 // ============================================================
 let rideConfigCache = { at: 0, body: null };
-const RIDE_CONFIG_CACHE_MS = 5 * 60 * 1000; 
+const RIDE_CONFIG_CACHE_MS = 60 * 60 * 1000; 
 function clearRideConfigCache() { rideConfigCache = { at: 0, body: null }; }
 
 const userByUidCache = new Map();
+// Short per-phone cache for GET /api/user/balance (saves a Firestore read per call).
+const balanceCache = new Map();
+const BALANCE_CACHE_MS = 30000;
+function invalidateBalanceCache(phone) { if (phone) balanceCache.delete(phone); else balanceCache.clear(); }
 const USER_CACHE_MS = 60000;
 
 // ============================================================
@@ -346,6 +350,7 @@ async function processPlanActivation(orderId, paymentId, paymentGateway) {
     });
     
     userByUidCache.clear();
+    invalidateBalanceCache(normalizePhone(orderData.phone)); // payment done => next balance call is fresh
     return { alreadyProcessed: false, planType, planExpiry: newPlanExpiry };
 }
 
@@ -629,7 +634,7 @@ const DEFAULT_RIDE_BOT_CONFIG = {
         CityRide: { enabled: true, package_names: ["in.cityride.driver"], accept_keywords: ["Accept Ride", "Accept", "Accept Trip", "Confirm"], success_signals: ["start ride", "start trip", "begin trip", "trip started", "ride started", "trip in progress", "on trip", "go to pickup", "going to pickup", "navigate to pickup", "arrived at pickup", "reached pickup", "waiting for rider", "waiting for customer", "waiting for passenger", "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit", "call rider", "call customer", "call passenger", "chat with rider", "message rider", "chat with customer", "you have accepted", "ride accepted", "trip accepted", "accepted the ride", "booking accepted", "order accepted"], view_id_patterns: ["accept", "confirm"] },
         "Odisha Yatri": { enabled: true, package_names: ["in.mobility.odishayatripartner"], accept_keywords: ["Accept", "Accept Ride", "Accept Trip", "Accept Request", "Accept Booking", "Confirm"], success_signals: ["start ride", "start trip", "begin trip", "trip started", "ride started", "trip in progress", "on trip", "go to pickup", "going to pickup", "navigate to pickup", "arrived at pickup", "reached pickup", "waiting for rider", "waiting for customer", "waiting for passenger", "enter otp", "verify otp", "otp verification", "share otp", "confirm otp", "otp submit", "call rider", "call customer", "call passenger", "chat with rider", "message rider", "chat with customer", "you have accepted", "ride accepted", "trip accepted", "accepted the ride", "booking accepted", "order accepted"], view_id_patterns: ["accept", "confirm", "request", "booking"] }
     },
-    global: { bot_enabled: true, auto_accept_enabled: true, max_ride_cycle_duration_ms: 8000, maxRideCycleDurationMs: 8000, watchdog_interval_ms: 2000, watchdogIntervalMs: 2000, config_refresh_interval_ms: 300000, configRefreshIntervalMs: 300000, health_check_interval_ms: 300000, healthCheckIntervalMs: 300000, node_null_delay_ms: 20, nodeNullDelayMs: 20, debounce_normal_ms: 5, debounceNormalMs: 5, debounce_slow_ms: 20, debounceSlowMs: 20, location_min_time_ms: 5000, locationMinTimeMs: 5000, location_min_distance_m: 50, locationMinDistanceM: 50, plan_offline_grace_ms: 1800000, planOfflineGraceMs: 1800000 },
+    global: { bot_enabled: true, auto_accept_enabled: true, max_ride_cycle_duration_ms: 8000, maxRideCycleDurationMs: 8000, watchdog_interval_ms: 2000, watchdogIntervalMs: 2000, config_refresh_interval_ms: 3600000, configRefreshIntervalMs: 3600000, health_check_interval_ms: 3600000, healthCheckIntervalMs: 3600000, node_null_delay_ms: 20, nodeNullDelayMs: 20, debounce_normal_ms: 5, debounceNormalMs: 5, debounce_slow_ms: 20, debounceSlowMs: 20, location_min_time_ms: 5000, locationMinTimeMs: 5000, location_min_distance_m: 50, locationMinDistanceM: 50, plan_offline_grace_ms: 1800000, planOfflineGraceMs: 1800000 },
     controls: { bot_enabled: true, auto_accept_enabled: true },
     // Conservative remote timing profile.
     // Strategy order remains: normal (original/default) -> medium (fallback) -> high_speed (last fallback).
@@ -818,9 +823,8 @@ app.get('/', (req, res) => { res.send('Driver Ride Picker Backend is Running!');
 // This does NOT check versions, read Redis, or force an update.
 // To stop the request itself, the APK must stop calling this endpoint.
 app.get('/api/app/update', (req, res) => {
-    // Static compatibility response: let Vercel's shared edge cache serve old APKs.
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=86400, stale-while-revalidate=604800');
-    res.set('Vercel-CDN-Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+    // s-maxage => Vercel CDN answers repeat calls WITHOUT running the function (no CPU).
+    res.set('Cache-Control', 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=604800');
     return res.status(200).json({
         success: true,
         latestVersion: '0.0.0',
@@ -843,10 +847,7 @@ app.get('/api/app/update', (req, res) => {
 // No Redis read, config-version lookup, or remote strategy override is done here.
 // Existing strategy profiles are retained in DEFAULT_RIDE_BOT_CONFIG for old APK compatibility.
 app.get('/api/config/ride-bot', (req, res) => {
-    // Same static config for every driver; shared edge cache avoids invoking
-    // this function repeatedly while preserving the existing APK response body.
-    res.set('Cache-Control', 'public, max-age=300, s-maxage=300, stale-while-revalidate=600');
-    res.set('Vercel-CDN-Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
+    res.set('Cache-Control', 'public, max-age=3600, s-maxage=3600, stale-while-revalidate=86400');
     res.set('Access-Control-Allow-Origin', '*');
     try {
         if (rideConfigCache.body && Date.now() - rideConfigCache.at < RIDE_CONFIG_CACHE_MS) {
@@ -1144,12 +1145,18 @@ app.get('/api/user/balance/:phone', verifyFirebaseToken, async (req, res) => {
     try {
         const phone = normalizePhone(req.params.phone);
         if (!phoneMatchesAuthenticatedUser(req, phone)) return res.status(403).json({ success: false, message: 'You can only access your own account.' });
+        res.set('Cache-Control', 'private, no-store');
+        const hit = balanceCache.get(phone);
+        if (hit && Date.now() - hit.at < BALANCE_CACHE_MS) return res.json(hit.body);
         const snapshot = await getDB().collection('users').doc(phone).get();
         if (!snapshot.exists) return res.status(404).json({ success: false, message: 'Driver account not found.' });
         const data = snapshot.data() || {};
         const referralCount = Number(data.referralCount || 0); const planExpiry = Number(data.planExpiry || 0);
         const activePlan = getActivePlanType(data); const isUnlimited = planExpiry > Date.now();
-        return res.json({ success: true, activePlan, planExpiry, planExpiryIso: planExpiry > 0 ? new Date(planExpiry).toISOString() : null, isUnlimited, totalRides: Number(data.totalRides || 0), referralCode: data.referralCode || '', referralCount });
+        const body = { success: true, activePlan, planExpiry, planExpiryIso: planExpiry > 0 ? new Date(planExpiry).toISOString() : null, isUnlimited, totalRides: Number(data.totalRides || 0), referralCode: data.referralCode || '', referralCount };
+        balanceCache.set(phone, { at: Date.now(), body });
+        if (balanceCache.size > 5000) balanceCache.clear();
+        return res.json(body);
     } catch (error) { return res.status(500).json({ success: false, message: 'Unable to load balance.' }); }
 });
 
