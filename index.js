@@ -883,6 +883,51 @@ app.get('/api/app/update', (req, res) => {
 });
 
 // /api/config/ride-bot removed: new APK has built-in defaults and no longer calls it.
+
+// New APK only: versioned remote-config endpoint.
+// The legacy /api/config/ride-bot route remains removed and is not re-enabled.
+app.get('/api/v2/config/ride-bot', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    // Serve the last known-good response from this warm instance when available.
+    if (rideConfigCache.body && Date.now() - rideConfigCache.at < RIDE_CONFIG_CACHE_MS) {
+        return res.status(200).json(rideConfigCache.body);
+    }
+
+    try {
+        const [stored, version] = await Promise.all([
+            redis.get(RIDE_BOT_CONFIG_DATA_KEY),
+            getRideBotConfigVersion()
+        ]);
+
+        const storedConfig = stored
+            ? (typeof stored === 'string' ? JSON.parse(stored) : stored)
+            : {};
+        const config = normalizeRideBotConfig(
+            mergeConfigObjects(DEFAULT_RIDE_BOT_CONFIG, storedConfig)
+        );
+
+        const body = { success: true, version, config };
+        rideConfigCache = { at: Date.now(), body };
+        return res.status(200).json(body);
+    } catch (error) {
+        console.error('V2 RIDE CONFIG READ ERROR:', error.message || error);
+
+        // Redis outage: keep serving last known-good config if this instance has one.
+        if (rideConfigCache.body) {
+            return res.status(200).json(rideConfigCache.body);
+        }
+
+        // First request on a cold instance: safe code defaults, without persisting
+        // a failed Redis read as the last known-good remote configuration.
+        return res.status(200).json({
+            success: true,
+            version: RIDE_BOT_CONFIG_VERSION_FALLBACK,
+            config: normalizeRideBotConfig(DEFAULT_RIDE_BOT_CONFIG)
+        });
+    }
+});
+
 app.post('/api/admin/config/ride-bot', async (req, res) => {
     if (!verifyAdminToken(req)) return res.status(401).json({ success: false, message: 'Unauthorized.' });
     try {
